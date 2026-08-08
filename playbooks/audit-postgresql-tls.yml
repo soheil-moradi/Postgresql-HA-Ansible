@@ -1,0 +1,143 @@
+---
+# Read-only PostgreSQL TLS readiness audit.
+#
+# This playbook changes nothing.
+#
+# Usage:
+#   ansible-playbook \
+#     -i inventory/production/hosts.yml \
+#     playbooks/audit-postgresql-tls.yml \
+#     --ask-vault-pass -K
+
+- name: Audit PostgreSQL TLS readiness
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Read PostgreSQL TLS settings
+      become_user: postgres
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -qAt
+          - -d
+          - postgres
+          - -c
+          - >-
+            SELECT
+              current_setting('ssl') || '|' ||
+              current_setting('ssl_min_protocol_version') || '|' ||
+              current_setting('ssl_cert_file') || '|' ||
+              current_setting('ssl_key_file') || '|' ||
+              current_setting('ssl_ca_file');
+      register: postgresql_tls_settings
+      changed_when: false
+
+    - name: Read OpenSSL version
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - version
+      register: postgresql_tls_openssl
+      changed_when: false
+      failed_when: false
+
+    - name: Check configured TLS destination files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ postgresql_tls_server_cert_file }}"
+        - "{{ postgresql_tls_server_key_file }}"
+        - "{{ postgresql_tls_ca_file }}"
+      register: postgresql_tls_file_stats
+      changed_when: false
+
+    - name: Read certificate metadata if server certificate already exists
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ postgresql_tls_server_cert_file }}"
+          - -noout
+          - -subject
+          - -issuer
+          - -dates
+          - -ext
+          - subjectAltName
+      register: postgresql_tls_cert_metadata
+      changed_when: false
+      failed_when: false
+      when:
+        - postgresql_tls_file_stats.results[0].stat.exists | default(false)
+
+    - name: Read Patroni PostgreSQL authentication TLS options without secrets
+      ansible.builtin.shell: |
+        python3 - <<'PY'
+        import yaml
+        p = "/etc/patroni/patroni.yml"
+        with open(p) as f:
+            cfg = yaml.safe_load(f)
+
+        auth = (cfg.get("postgresql") or {}).get("authentication") or {}
+        for section in ("superuser", "replication", "rewind"):
+            value = auth.get(section) or {}
+            print(
+                section
+                + ": sslmode="
+                + str(value.get("sslmode", "<default:prefer>"))
+                + " sslrootcert="
+                + str(value.get("sslrootcert", "<unset>"))
+            )
+        PY
+      args:
+        executable: /bin/bash
+      register: postgresql_tls_patroni_auth
+      changed_when: false
+
+    - name: Verify HAProxy PostgreSQL frontend uses TCP mode
+      ansible.builtin.shell: |
+        haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null 2>&1
+        awk '
+          /^[[:space:]]*(frontend|listen|backend)[[:space:]]/ { section=$0 }
+          /^[[:space:]]*mode[[:space:]]+/ { print section " => " $0 }
+        ' /etc/haproxy/haproxy.cfg
+      args:
+        executable: /bin/bash
+      register: postgresql_tls_haproxy_modes
+      changed_when: false
+      failed_when: false
+
+    - name: Print per-node PostgreSQL TLS audit
+      ansible.builtin.debug:
+        msg:
+          node: "{{ inventory_hostname }}"
+          postgres_tls_settings: "{{ postgresql_tls_settings.stdout.split('|') }}"
+          openssl: "{{ postgresql_tls_openssl.stdout | default('unavailable') }}"
+          server_cert_exists: "{{ postgresql_tls_file_stats.results[0].stat.exists | default(false) }}"
+          server_key_exists: "{{ postgresql_tls_file_stats.results[1].stat.exists | default(false) }}"
+          ca_file_exists: "{{ postgresql_tls_file_stats.results[2].stat.exists | default(false) }}"
+          certificate_metadata: "{{ postgresql_tls_cert_metadata.stdout_lines | default([]) }}"
+          patroni_auth_tls: "{{ postgresql_tls_patroni_auth.stdout_lines }}"
+          haproxy_modes: "{{ postgresql_tls_haproxy_modes.stdout_lines | default([]) }}"
+
+- name: Print TLS rollout inputs
+  hosts: postgresql_cluster[0]
+  gather_facts: false
+
+  tasks:
+    - name: Show current Ansible TLS feature inputs
+      ansible.builtin.debug:
+        msg:
+          management_enabled: "{{ postgresql_tls_management_enabled }}"
+          require_ssl: "{{ postgresql_tls_require_ssl }}"
+          minimum_protocol: "{{ postgresql_tls_min_protocol_version }}"
+          internal_sslmode: "{{ postgresql_tls_internal_sslmode }}"
+          server_cert_source_configured: "{{ postgresql_tls_server_cert_source | length > 0 }}"
+          server_key_source_configured: "{{ postgresql_tls_server_key_source | length > 0 }}"
+          ca_source_configured: "{{ postgresql_tls_ca_source | length > 0 }}"
+          next_action: >-
+            Keep TLS disabled until certificate issuance, SAN naming, CA trust,
+            internal replication verification, and client rollout are reviewed.

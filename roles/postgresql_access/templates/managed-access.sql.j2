@@ -1,0 +1,365 @@
+\set ON_ERROR_STOP on
+SET password_encryption = 'scram-sha-256';
+
+-- Managed by Ansible.
+--
+-- This file intentionally has no DROP ROLE / DROP DATABASE commands.
+-- Every real state change emits ANSIBLE_MANAGED_CHANGE for Ansible
+-- idempotency reporting.
+
+{% for role in postgresql_managed_roles %}
+-- Role: {{ role.name }}
+DO $ansible$
+DECLARE
+    role_exists boolean;
+    v_login boolean;
+    v_superuser boolean;
+    v_createdb boolean;
+    v_createrole boolean;
+    v_inherit boolean;
+    v_replication boolean;
+    v_bypassrls boolean;
+    v_connlimit integer;
+    v_comment text;
+    desired_comment text;
+    decoded_password text;
+BEGIN
+    SELECT EXISTS(
+        SELECT 1 FROM pg_roles WHERE rolname = '{{ role.name }}'
+    ) INTO role_exists;
+
+    IF NOT role_exists THEN
+        EXECUTE 'CREATE ROLE "{{ role.name }}"';
+        RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE role-created {{ role.name }}';
+    END IF;
+
+    SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit,
+           rolreplication, rolbypassrls, rolconnlimit
+      INTO v_login, v_superuser, v_createdb, v_createrole, v_inherit,
+           v_replication, v_bypassrls, v_connlimit
+      FROM pg_roles
+     WHERE rolname = '{{ role.name }}';
+
+    IF v_login IS DISTINCT FROM {{ (role.login | default(false) | bool) | ternary('true','false') }}
+       OR v_superuser IS DISTINCT FROM {{ (role.superuser | default(false) | bool) | ternary('true','false') }}
+       OR v_createdb IS DISTINCT FROM {{ (role.createdb | default(false) | bool) | ternary('true','false') }}
+       OR v_createrole IS DISTINCT FROM {{ (role.createrole | default(false) | bool) | ternary('true','false') }}
+       OR v_inherit IS DISTINCT FROM {{ (role.inherit | default(true) | bool) | ternary('true','false') }}
+       OR v_replication IS DISTINCT FROM {{ (role.replication | default(false) | bool) | ternary('true','false') }}
+       OR v_bypassrls IS DISTINCT FROM {{ (role.bypassrls | default(false) | bool) | ternary('true','false') }}
+       OR v_connlimit IS DISTINCT FROM {{ role.connection_limit | default(-1) }}
+    THEN
+        EXECUTE 'ALTER ROLE "{{ role.name }}"
+{% if role.login | default(false) %} LOGIN{% else %} NOLOGIN{% endif %}
+{% if role.superuser | default(false) %} SUPERUSER{% else %} NOSUPERUSER{% endif %}
+{% if role.createdb | default(false) %} CREATEDB{% else %} NOCREATEDB{% endif %}
+{% if role.createrole | default(false) %} CREATEROLE{% else %} NOCREATEROLE{% endif %}
+{% if role.inherit | default(true) %} INHERIT{% else %} NOINHERIT{% endif %}
+{% if role.replication | default(false) %} REPLICATION{% else %} NOREPLICATION{% endif %}
+{% if role.bypassrls | default(false) %} BYPASSRLS{% else %} NOBYPASSRLS{% endif %}
+ CONNECTION LIMIT {{ role.connection_limit | default(-1) }}';
+        RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE role-attributes {{ role.name }}';
+    END IF;
+
+{% if role.login | default(false) %}
+    desired_comment := 'ansible-managed;password-version={{ role.password_version }}';
+
+    SELECT shobj_description(oid, 'pg_authid')
+      INTO v_comment
+      FROM pg_roles
+     WHERE rolname = '{{ role.name }}';
+
+    IF v_comment IS DISTINCT FROM desired_comment THEN
+        decoded_password := convert_from(
+            decode('{{ role.password | b64encode }}', 'base64'),
+            'UTF8'
+        );
+
+        EXECUTE format(
+            'ALTER ROLE %I PASSWORD %L',
+            '{{ role.name }}',
+            decoded_password
+        );
+
+        EXECUTE format(
+            'COMMENT ON ROLE %I IS %L',
+            '{{ role.name }}',
+            desired_comment
+        );
+
+        RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE password-rotated {{ role.name }}';
+    END IF;
+{% endif %}
+END
+$ansible$;
+
+{% endfor %}
+
+{% for db in postgresql_managed_databases %}
+-- Database: {{ db.name }}
+SELECT format(
+    'CREATE DATABASE %I OWNER %I ENCODING %L',
+    '{{ db.name }}',
+    '{{ db.owner }}',
+    '{{ db.encoding | default("UTF8") }}'
+)
+WHERE NOT EXISTS (
+    SELECT 1 FROM pg_database WHERE datname = '{{ db.name }}'
+)
+\gexec
+
+DO $ansible$
+DECLARE
+    v_owner text;
+    public_connect boolean;
+    public_temp boolean;
+BEGIN
+    SELECT r.rolname
+      INTO v_owner
+      FROM pg_database d
+      JOIN pg_roles r ON r.oid = d.datdba
+     WHERE d.datname = '{{ db.name }}';
+
+    IF v_owner IS DISTINCT FROM '{{ db.owner }}' THEN
+        EXECUTE 'ALTER DATABASE "{{ db.name }}" OWNER TO "{{ db.owner }}"';
+        RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE database-owner {{ db.name }}';
+    END IF;
+
+{% if db.revoke_public_connect | default(true) %}
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_database d,
+             LATERAL aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) a
+        WHERE d.datname = '{{ db.name }}'
+          AND a.grantee = 0
+          AND a.privilege_type = 'CONNECT'
+    ) INTO public_connect;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_database d,
+             LATERAL aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) a
+        WHERE d.datname = '{{ db.name }}'
+          AND a.grantee = 0
+          AND a.privilege_type = 'TEMPORARY'
+    ) INTO public_temp;
+
+    IF public_connect OR public_temp THEN
+        EXECUTE 'REVOKE CONNECT, TEMPORARY ON DATABASE "{{ db.name }}" FROM PUBLIC';
+        RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE database-public-acl {{ db.name }}';
+    END IF;
+{% endif %}
+END
+$ansible$;
+
+{% endfor %}
+
+{% for membership in postgresql_managed_memberships %}
+-- Membership: {{ membership.member }} -> {{ membership.role }}
+DO $ansible$
+DECLARE
+    membership_exists boolean;
+    current_admin boolean;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_auth_members m
+        JOIN pg_roles granted ON granted.oid = m.roleid
+        JOIN pg_roles member ON member.oid = m.member
+        WHERE granted.rolname = '{{ membership.role }}'
+          AND member.rolname = '{{ membership.member }}'
+    ) INTO membership_exists;
+
+    SELECT m.admin_option
+      INTO current_admin
+      FROM pg_auth_members m
+      JOIN pg_roles granted ON granted.oid = m.roleid
+      JOIN pg_roles member ON member.oid = m.member
+     WHERE granted.rolname = '{{ membership.role }}'
+       AND member.rolname = '{{ membership.member }}';
+
+    IF NOT membership_exists THEN
+        EXECUTE 'GRANT "{{ membership.role }}" TO "{{ membership.member }}"{% if membership.admin_option | default(false) %} WITH ADMIN OPTION{% endif %}';
+        RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE membership-created {{ membership.member }}';
+    ELSIF current_admin IS DISTINCT FROM {{ (membership.admin_option | default(false) | bool) | ternary('true','false') }} THEN
+{% if membership.admin_option | default(false) %}
+        EXECUTE 'GRANT "{{ membership.role }}" TO "{{ membership.member }}" WITH ADMIN OPTION';
+{% else %}
+        EXECUTE 'REVOKE ADMIN OPTION FOR "{{ membership.role }}" FROM "{{ membership.member }}"';
+{% endif %}
+        RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE membership-admin-option {{ membership.member }}';
+    END IF;
+END
+$ansible$;
+
+{% endfor %}
+
+{% for access in postgresql_managed_access_profiles %}
+-- Access: {{ access.database }}/{{ access.schema }} -> {{ access.role }} ({{ access.level }})
+\connect "{{ access.database }}"
+
+DO $ansible$
+DECLARE
+    missing_db boolean;
+    missing_schema boolean;
+    missing_tables boolean;
+    missing_sequences boolean;
+    missing_default_tables boolean;
+    missing_default_sequences boolean;
+BEGIN
+    SELECT NOT has_database_privilege(
+        '{{ access.role }}',
+        '{{ access.database }}',
+        'CONNECT'
+    ) INTO missing_db;
+
+    SELECT NOT has_schema_privilege(
+        '{{ access.role }}',
+        '{{ access.schema }}',
+        'USAGE'
+    ) INTO missing_schema;
+
+{% if access.level == 'readonly' %}
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = '{{ access.schema }}'
+          AND c.relkind IN ('r','p','v','m','f')
+          AND NOT has_table_privilege('{{ access.role }}', c.oid, 'SELECT')
+    ) INTO missing_tables;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = '{{ access.schema }}'
+          AND c.relkind = 'S'
+          AND NOT has_sequence_privilege('{{ access.role }}', c.oid, 'SELECT')
+    ) INTO missing_sequences;
+
+    SELECT (
+        SELECT count(DISTINCT a.privilege_type) < 1
+        FROM pg_roles owner_role
+        JOIN pg_namespace n ON n.nspname = '{{ access.schema }}'
+        LEFT JOIN pg_default_acl d
+          ON d.defaclrole = owner_role.oid
+         AND d.defaclnamespace = n.oid
+         AND d.defaclobjtype = 'r'
+        LEFT JOIN LATERAL aclexplode(COALESCE(d.defaclacl, '{}'::aclitem[])) a
+          ON a.grantee = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.role }}')
+         AND a.privilege_type IN ('SELECT')
+        WHERE owner_role.rolname = '{{ access.owner }}'
+    ) INTO missing_default_tables;
+
+    SELECT (
+        SELECT count(DISTINCT a.privilege_type) < 1
+        FROM pg_roles owner_role
+        JOIN pg_namespace n ON n.nspname = '{{ access.schema }}'
+        LEFT JOIN pg_default_acl d
+          ON d.defaclrole = owner_role.oid
+         AND d.defaclnamespace = n.oid
+         AND d.defaclobjtype = 'S'
+        LEFT JOIN LATERAL aclexplode(COALESCE(d.defaclacl, '{}'::aclitem[])) a
+          ON a.grantee = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.role }}')
+         AND a.privilege_type IN ('SELECT')
+        WHERE owner_role.rolname = '{{ access.owner }}'
+    ) INTO missing_default_sequences;
+{% else %}
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = '{{ access.schema }}'
+          AND c.relkind IN ('r','p','v','m','f')
+          AND (
+              NOT has_table_privilege('{{ access.role }}', c.oid, 'SELECT')
+              OR NOT has_table_privilege('{{ access.role }}', c.oid, 'INSERT')
+              OR NOT has_table_privilege('{{ access.role }}', c.oid, 'UPDATE')
+              OR NOT has_table_privilege('{{ access.role }}', c.oid, 'DELETE')
+          )
+    ) INTO missing_tables;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = '{{ access.schema }}'
+          AND c.relkind = 'S'
+          AND (
+              NOT has_sequence_privilege('{{ access.role }}', c.oid, 'USAGE')
+              OR NOT has_sequence_privilege('{{ access.role }}', c.oid, 'SELECT')
+              OR NOT has_sequence_privilege('{{ access.role }}', c.oid, 'UPDATE')
+          )
+    ) INTO missing_sequences;
+
+    SELECT (
+        SELECT count(DISTINCT a.privilege_type) < 4
+        FROM pg_roles owner_role
+        JOIN pg_namespace n ON n.nspname = '{{ access.schema }}'
+        LEFT JOIN pg_default_acl d
+          ON d.defaclrole = owner_role.oid
+         AND d.defaclnamespace = n.oid
+         AND d.defaclobjtype = 'r'
+        LEFT JOIN LATERAL aclexplode(COALESCE(d.defaclacl, '{}'::aclitem[])) a
+          ON a.grantee = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.role }}')
+         AND a.privilege_type IN ('SELECT','INSERT','UPDATE','DELETE')
+        WHERE owner_role.rolname = '{{ access.owner }}'
+    ) INTO missing_default_tables;
+
+    SELECT (
+        SELECT count(DISTINCT a.privilege_type) < 3
+        FROM pg_roles owner_role
+        JOIN pg_namespace n ON n.nspname = '{{ access.schema }}'
+        LEFT JOIN pg_default_acl d
+          ON d.defaclrole = owner_role.oid
+         AND d.defaclnamespace = n.oid
+         AND d.defaclobjtype = 'S'
+        LEFT JOIN LATERAL aclexplode(COALESCE(d.defaclacl, '{}'::aclitem[])) a
+          ON a.grantee = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.role }}')
+         AND a.privilege_type IN ('USAGE','SELECT','UPDATE')
+        WHERE owner_role.rolname = '{{ access.owner }}'
+    ) INTO missing_default_sequences;
+{% endif %}
+
+    IF missing_db OR missing_schema OR missing_tables OR missing_sequences
+       OR missing_default_tables OR missing_default_sequences THEN
+        RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE access-profile {{ access.database }}/{{ access.role }}';
+    END IF;
+END
+$ansible$;
+
+GRANT CONNECT ON DATABASE "{{ access.database }}" TO "{{ access.role }}";
+GRANT USAGE ON SCHEMA "{{ access.schema }}" TO "{{ access.role }}";
+
+{% if access.level == 'readonly' %}
+GRANT SELECT ON ALL TABLES IN SCHEMA "{{ access.schema }}" TO "{{ access.role }}";
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA "{{ access.schema }}" TO "{{ access.role }}";
+
+ALTER DEFAULT PRIVILEGES FOR ROLE "{{ access.owner }}"
+IN SCHEMA "{{ access.schema }}"
+GRANT SELECT ON TABLES TO "{{ access.role }}";
+
+ALTER DEFAULT PRIVILEGES FOR ROLE "{{ access.owner }}"
+IN SCHEMA "{{ access.schema }}"
+GRANT SELECT ON SEQUENCES TO "{{ access.role }}";
+{% else %}
+GRANT SELECT, INSERT, UPDATE, DELETE
+ON ALL TABLES IN SCHEMA "{{ access.schema }}"
+TO "{{ access.role }}";
+
+GRANT USAGE, SELECT, UPDATE
+ON ALL SEQUENCES IN SCHEMA "{{ access.schema }}"
+TO "{{ access.role }}";
+
+ALTER DEFAULT PRIVILEGES FOR ROLE "{{ access.owner }}"
+IN SCHEMA "{{ access.schema }}"
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "{{ access.role }}";
+
+ALTER DEFAULT PRIVILEGES FOR ROLE "{{ access.owner }}"
+IN SCHEMA "{{ access.schema }}"
+GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO "{{ access.role }}";
+{% endif %}
+
+\connect postgres
+{% endfor %}

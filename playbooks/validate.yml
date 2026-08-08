@@ -1,0 +1,149 @@
+---
+- name: Validate PostgreSQL HA cluster
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  tasks:
+    - name: Check etcd endpoint health
+      ansible.builtin.command:
+        cmd: >-
+          etcdctl
+          --endpoints={{ etcd_client_endpoints_csv }}
+          endpoint health
+      environment:
+        ETCDCTL_API: "3"
+      changed_when: false
+      register: etcd_health
+
+    - name: Check local HAProxy configuration
+      ansible.builtin.command: haproxy -c -f /etc/haproxy/haproxy.cfg
+      changed_when: false
+
+    - name: Verify local services are active
+      ansible.builtin.command: "systemctl is-active {{ item }}"
+      loop:
+        - etcd
+        - patroni
+        - haproxy
+        - keepalived
+      changed_when: false
+
+    - name: Check Patroni REST health
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}/health"
+        method: GET
+        status_code: 200
+      register: patroni_health
+      retries: 10
+      delay: 3
+      until: patroni_health.status == 200
+
+    - name: Detect whether VIP exists on this node
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        ip -o -4 address show dev {{ keepalived_interface }} |
+        awk '{print $4}' |
+        cut -d/ -f1 |
+        grep -Fx '{{ postgres_cluster_vip }}'
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+      register: local_vip_result
+
+- name: Perform cluster-wide validation from the first node
+  hosts: "{{ groups['postgresql_cluster'][0] }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Read Patroni cluster topology as JSON
+      ansible.builtin.command:
+        cmd: patronictl -c /etc/patroni/patroni.yml list --format json
+      changed_when: false
+      register: patroni_topology_raw
+
+    - name: Parse Patroni cluster topology
+      ansible.builtin.set_fact:
+        patroni_topology: "{{ patroni_topology_raw.stdout | from_json }}"
+
+    - name: Assert one running leader and two streaming standby members exist
+      ansible.builtin.assert:
+        that:
+          - patroni_topology | length == groups['postgresql_cluster'] | length
+          - >-
+            patroni_topology
+            | selectattr('Role', 'equalto', 'Leader')
+            | selectattr('State', 'equalto', 'running')
+            | list
+            | length == 1
+          - >-
+            patroni_topology
+            | rejectattr('Role', 'equalto', 'Leader')
+            | selectattr('State', 'equalto', 'streaming')
+            | list
+            | length == ((groups['postgresql_cluster'] | length) - 1)
+        fail_msg: >-
+          Patroni topology must contain exactly one running Leader and two
+          streaming standby members. Standby roles may be Replica or Sync Standby.
+
+    - name: Assert VIP is owned by exactly one node
+      ansible.builtin.assert:
+        that:
+          - >-
+            groups['postgresql_cluster']
+            | map('extract', hostvars, 'local_vip_result')
+            | selectattr('rc', 'equalto', 0)
+            | list
+            | length == 1
+        fail_msg: "VIP must be present on exactly one node."
+
+    - name: Wait until PostgreSQL is reachable through VIP and HAProxy
+      ansible.builtin.command:
+        cmd: "pg_isready -h {{ postgres_cluster_vip }} -p {{ haproxy_postgresql_port }} -t 5"
+      changed_when: false
+      register: vip_pg_isready
+      retries: 20
+      delay: 3
+      until: vip_pg_isready.rc == 0
+
+    - name: Verify VIP routes to the writable primary
+      ansible.builtin.command:
+        cmd: >-
+          psql -h {{ postgres_cluster_vip }}
+          -p {{ haproxy_postgresql_port }}
+          -U {{ patroni_superuser_username }}
+          -d postgres -Atqc "SELECT NOT pg_is_in_recovery();"
+      environment:
+        PGPASSWORD: "{{ vault_postgres_superuser_password }}"
+      register: vip_primary_query
+      changed_when: false
+      no_log: true
+
+    - name: Assert VIP connection reached primary
+      ansible.builtin.assert:
+        that:
+          - vip_primary_query.stdout | trim == 't'
+        fail_msg: "The VIP did not route the SQL connection to the writable primary."
+
+    - name: Verify at least one synchronous standby is connected
+      ansible.builtin.command:
+        cmd: >-
+          psql -h {{ postgres_cluster_vip }}
+          -p {{ haproxy_postgresql_port }}
+          -U {{ patroni_superuser_username }}
+          -d postgres -Atqc
+          "SELECT count(*) FROM pg_stat_replication WHERE sync_state IN ('sync', 'quorum');"
+      environment:
+        PGPASSWORD: "{{ vault_postgres_superuser_password }}"
+      register: synchronous_replication_query
+      changed_when: false
+      retries: 20
+      delay: 3
+      until: synchronous_replication_query.stdout | int >= 1
+      no_log: true
+
+    - name: Print final cluster topology
+      ansible.builtin.debug:
+        var: patroni_topology

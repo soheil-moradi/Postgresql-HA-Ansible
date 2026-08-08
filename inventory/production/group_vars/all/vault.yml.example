@@ -1,0 +1,16 @@
+---
+# Copy this file to vault.yml, replace every value, and encrypt it:
+# ansible-vault encrypt inventory/production/group_vars/all/vault.yml
+#
+# Do not commit the unencrypted file.
+# Linux sudo password for ansible_user. This is not the Vault password.
+vault_ansible_become_password: CHANGE_ME_LINUX_SUDO_PASSWORD
+
+vault_postgres_superuser_password: CHANGE_ME_LONG_RANDOM
+vault_postgres_replication_password: CHANGE_ME_LONG_RANDOM
+vault_postgres_rewind_password: CHANGE_ME_LONG_RANDOM
+vault_patroni_rest_password: CHANGE_ME_LONG_RANDOM
+
+# VRRP PASS authentication uses only the first 8 characters. Use exactly 8
+# random ASCII characters and treat it as anti-accident protection, not encryption.
+vault_keepalived_auth_password: CHANGEME

@@ -1,0 +1,33 @@
+---
+- name: Audit package patch readiness without upgrading anything
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Read installed HA package versions
+      ansible.builtin.shell: |
+        dpkg-query -W -f='${Package}\t${Version}\n' \
+          postgresql-16 patroni etcd-server haproxy keepalived 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      register: package_versions
+      changed_when: false
+
+    - name: Simulate available package upgrades
+      ansible.builtin.shell: |
+        set -o pipefail
+        apt-get -s upgrade 2>/dev/null | awk '/^Inst / {print}'
+      args:
+        executable: /bin/bash
+      register: available_upgrades
+      changed_when: false
+      failed_when: false
+
+    - name: Print patch readiness
+      ansible.builtin.debug:
+        msg:
+          node: "{{ inventory_hostname }}"
+          installed: "{{ package_versions.stdout_lines }}"
+          available_upgrades: "{{ available_upgrades.stdout_lines }}"
+          automation_enabled: "{{ postgresql_patch_automation_enabled }}"

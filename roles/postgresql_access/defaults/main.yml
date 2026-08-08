@@ -1,0 +1,10 @@
+---
+postgresql_access_management_enabled: false
+postgresql_managed_roles: []
+postgresql_managed_databases: []
+postgresql_managed_memberships: []
+postgresql_managed_access_profiles: []
+
+# Transient file containing generated SQL. It can contain credentials while
+# running and is removed by the role's always block.
+postgresql_access_sql_file: /tmp/postgresql-access-managed.sql

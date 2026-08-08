@@ -1,0 +1,8 @@
+---
+- name: Preflight checks - no destructive changes
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  roles:
+    - role: preflight

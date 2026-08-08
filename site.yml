@@ -1,0 +1,4 @@
+---
+- import_playbook: playbooks/preflight.yml
+- import_playbook: playbooks/deploy.yml
+- import_playbook: playbooks/validate.yml

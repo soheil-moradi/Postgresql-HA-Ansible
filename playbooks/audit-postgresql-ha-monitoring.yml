@@ -1,0 +1,61 @@
+---
+# Read-only monitoring audit.
+# Host/OS metrics remain outside this project.
+
+- name: Audit all PostgreSQL HA monitoring endpoints
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Verify Patroni metrics
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:8008/metrics"
+        return_content: true
+        status_code: 200
+      register: audit_patroni_metrics
+      changed_when: false
+
+    - name: Verify etcd metrics
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:2379/metrics"
+        return_content: true
+        status_code: 200
+      register: audit_etcd_metrics
+      changed_when: false
+
+    - name: Verify postgres_exporter metrics
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ postgresql_exporter_port }}{{ postgresql_exporter_path }}"
+        return_content: true
+        status_code: 200
+      register: audit_postgres_exporter_metrics
+      changed_when: false
+      when: postgresql_exporter_enabled | bool
+
+    - name: Verify HAProxy metrics
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ haproxy_prometheus_port }}{{ haproxy_prometheus_path }}"
+        return_content: true
+        status_code: 200
+      register: audit_haproxy_metrics
+      changed_when: false
+      when: haproxy_prometheus_enabled | bool
+
+    - name: Print endpoint audit
+      ansible.builtin.debug:
+        msg:
+          node: "{{ inventory_hostname }}"
+          patroni: "http://{{ ansible_host }}:8008/metrics"
+          etcd: "http://{{ ansible_host }}:2379/metrics"
+          postgres_exporter: >-
+            {{
+              ('http://' ~ ansible_host ~ ':' ~ postgresql_exporter_port|string ~ postgresql_exporter_path)
+              if postgresql_exporter_enabled else 'disabled'
+            }}
+          haproxy: >-
+            {{
+              ('http://' ~ ansible_host ~ ':' ~ haproxy_prometheus_port|string ~ haproxy_prometheus_path)
+              if haproxy_prometheus_enabled else 'disabled'
+            }}
+          node_exporter: "managed by existing infrastructure monitoring"

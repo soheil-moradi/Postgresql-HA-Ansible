@@ -1,0 +1,18 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Reload Patroni if running
+  ansible.builtin.shell: |
+    if systemctl is-active --quiet patroni.service; then
+      patronictl -c /etc/patroni/patroni.yml reload "{{ postgres_cluster_name }}" --force
+      echo reloaded
+    else
+      echo inactive
+    fi
+  args:
+    executable: /bin/bash
+  register: patroni_reload_handler
+  changed_when: "'reloaded' in patroni_reload_handler.stdout"
+  failed_when: false

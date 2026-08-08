@@ -1,0 +1,39 @@
+---
+- name: Audit PostgreSQL logging readiness
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Read PostgreSQL logging settings
+      become_user: postgres
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -qAt
+          - -d
+          - postgres
+          - -c
+          - >-
+            SELECT json_build_object(
+              'logging_collector', current_setting('logging_collector'),
+              'log_directory', current_setting('log_directory'),
+              'log_filename', current_setting('log_filename'),
+              'log_rotation_age', current_setting('log_rotation_age'),
+              'log_rotation_size', current_setting('log_rotation_size'),
+              'log_min_duration_statement', current_setting('log_min_duration_statement'),
+              'log_lock_waits', current_setting('log_lock_waits'),
+              'log_checkpoints', current_setting('log_checkpoints'),
+              'log_autovacuum_min_duration', current_setting('log_autovacuum_min_duration')
+            );
+      register: logging_status
+      changed_when: false
+
+    - name: Print logging readiness
+      ansible.builtin.debug:
+        msg:
+          node: "{{ inventory_hostname }}"
+          settings: "{{ logging_status.stdout | from_json }}"
+          central_logging_enabled: "{{ postgresql_central_logging_enabled }}"
+          destination: "{{ postgresql_central_logging_destination }}"

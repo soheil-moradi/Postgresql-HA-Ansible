@@ -1,0 +1,12 @@
+---
+# Safe/read-only production readiness entry point.
+# No feature is enabled by this playbook.
+
+- import_playbook: audit-os-hardening.yml
+- import_playbook: audit-network-hardening.yml
+- import_playbook: audit-postgresql-tls.yml
+- import_playbook: audit-postgresql-ha-monitoring.yml
+- import_playbook: audit-backup-readiness.yml
+- import_playbook: audit-postgresql-logging.yml
+- import_playbook: audit-patch-readiness.yml
+- import_playbook: validate.yml

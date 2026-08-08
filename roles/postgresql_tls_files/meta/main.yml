@@ -1,0 +1,6 @@
+---
+galaxy_info:
+  role_name: postgresql_tls_files
+  description: Optional PostgreSQL TLS certificate deployment and validation
+  min_ansible_version: "2.16"
+dependencies: []

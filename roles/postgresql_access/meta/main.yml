@@ -1,0 +1,6 @@
+---
+galaxy_info:
+  role_name: postgresql_access
+  description: Optional Patroni-aware PostgreSQL database and role management
+  min_ansible_version: "2.16"
+dependencies: []

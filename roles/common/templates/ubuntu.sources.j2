@@ -1,0 +1,5 @@
+Types: deb
+URIs: {{ apt_internal_repository_url }}
+Suites: {{ apt_internal_suites | join(' ') }}
+Components: {{ apt_internal_components | join(' ') }}
+Signed-By: {{ apt_internal_signed_by }}

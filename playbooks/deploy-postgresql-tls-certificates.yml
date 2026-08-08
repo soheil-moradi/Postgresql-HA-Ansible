@@ -1,0 +1,12 @@
+---
+# Certificate deployment only. This playbook does NOT enable PostgreSQL TLS.
+
+- name: Deploy PostgreSQL TLS certificate files
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+
+  roles:
+    - postgresql_tls_files
+
+- import_playbook: validate.yml

@@ -1,0 +1,10 @@
+---
+- name: Apply optional OS hardening one node at a time
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: true
+  serial: 1
+  roles:
+    - os_hardening
+
+- import_playbook: validate.yml

@@ -1,0 +1,38 @@
+# Prometheus scrape EXAMPLE ONLY.
+# Replace placeholders with real node DNS/IP values.
+
+scrape_configs:
+  - job_name: patroni
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "<PG-NODE-01>:8008"
+          - "<PG-NODE-02>:8008"
+          - "<PG-NODE-03>:8008"
+
+  - job_name: etcd
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "<PG-NODE-01>:2379"
+          - "<PG-NODE-02>:2379"
+          - "<PG-NODE-03>:2379"
+
+  - job_name: postgres
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "<PG-NODE-01>:9187"
+          - "<PG-NODE-02>:9187"
+          - "<PG-NODE-03>:9187"
+
+  - job_name: haproxy
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "<PG-NODE-01>:8404"
+          - "<PG-NODE-02>:8404"
+          - "<PG-NODE-03>:8404"
+
+# node_exporter is intentionally not defined here; it is already managed by
+# the infrastructure monitoring platform.

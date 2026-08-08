@@ -1,0 +1,107 @@
+---
+- name: Create dedicated postgres_exporter OS account
+  ansible.builtin.user:
+    name: "{{ postgresql_exporter_os_user }}"
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+    password_lock: true
+
+- name: Verify local PostgreSQL Unix socket exists
+  ansible.builtin.stat:
+    path: /var/run/postgresql/.s.PGSQL.5432
+  register: postgresql_exporter_socket
+
+- name: Assert PostgreSQL local socket is available
+  ansible.builtin.assert:
+    that:
+      - postgresql_exporter_socket.stat.exists
+    fail_msg: >-
+      Local PostgreSQL Unix socket is missing. Refusing to configure
+      postgres_exporter because its passwordless peer-auth design depends on it.
+
+- name: Install postgres_exporter package without auto-starting vendor unit
+  ansible.builtin.apt:
+    name: "{{ postgresql_exporter_package }}"
+    state: present
+    update_cache: false
+    policy_rc_d: 101
+
+- name: Create systemd override directory
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ postgresql_exporter_service }}.service.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Configure hardened postgres_exporter systemd override
+  ansible.builtin.template:
+    src: override.conf.j2
+    dest: "/etc/systemd/system/{{ postgresql_exporter_service }}.service.d/override.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart PostgreSQL exporter
+
+- name: Flush exporter handler before validation
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start postgres_exporter
+  ansible.builtin.systemd:
+    name: "{{ postgresql_exporter_service }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Verify exporter can connect through PostgreSQL peer authentication
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ postgresql_exporter_os_user }}"
+      - --
+      - psql
+      - -X
+      - -qAt
+      - -h
+      - /var/run/postgresql
+      - -d
+      - "{{ postgresql_exporter_database }}"
+      - -U
+      - "{{ postgresql_exporter_db_role }}"
+      - -c
+      - "SELECT current_user || '|' || pg_is_in_recovery();"
+  register: postgresql_exporter_peer_test
+  changed_when: false
+
+- name: Wait for postgres_exporter metrics listener
+  ansible.builtin.wait_for:
+    host: "{{ ansible_host }}"
+    port: "{{ postgresql_exporter_port }}"
+    timeout: 20
+
+- name: Read postgres_exporter metrics
+  ansible.builtin.uri:
+    url: "http://{{ ansible_host }}:{{ postgresql_exporter_port }}{{ postgresql_exporter_path }}"
+    method: GET
+    return_content: true
+    status_code: 200
+  register: postgresql_exporter_metrics
+  changed_when: false
+
+- name: Assert postgres_exporter reports PostgreSQL up
+  ansible.builtin.assert:
+    that:
+      - "'pg_up 1' in postgresql_exporter_metrics.content"
+    fail_msg: >-
+      postgres_exporter HTTP endpoint is reachable but pg_up is not 1.
+      Check systemd logs and local PostgreSQL peer authentication.
+
+- name: Print postgres_exporter validation summary
+  ansible.builtin.debug:
+    msg:
+      node: "{{ inventory_hostname }}"
+      endpoint: "http://{{ ansible_host }}:{{ postgresql_exporter_port }}{{ postgresql_exporter_path }}"
+      database_identity: "{{ postgresql_exporter_peer_test.stdout }}"
+      pg_up: 1

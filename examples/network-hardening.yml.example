@@ -1,0 +1,108 @@
+---
+# PostgreSQL HA network-hardening example configuration
+#
+# PURPOSE:
+#   This file is an EXAMPLE ONLY. Do not load it directly into production.
+#   Copy only reviewed values into:
+#
+#     inventory/production/group_vars/all/main.yml
+#
+# WORKFLOW:
+#   1. Run playbooks/audit-network-hardening.yml.
+#   2. Identify the actual SSH/Ansible source seen by the DB nodes.
+#   3. Identify the real application source network after Kubernetes exists.
+#   4. Identify the monitoring source after Prometheus/exporters exist.
+#   5. Review all values with the infrastructure/network team.
+#   6. Enable enforcement only in a separate approved change.
+
+# Master safety switch.
+#
+# Keep false while designing or auditing.
+postgresql_network_hardening_enforce: false
+
+# ---------------------------------------------------------------------------
+# Administration / SSH
+# ---------------------------------------------------------------------------
+#
+# EXAMPLE A - one fixed Ansible/jump host:
+#
+# postgresql_admin_cidrs:
+#   - "<ANSIBLE_OR_JUMP_HOST_IP>/32"
+#
+# EXAMPLE B - dedicated management subnet:
+#
+# postgresql_admin_cidrs:
+#   - "<MANAGEMENT_CIDR>"
+#
+# BAD:
+#   - "0.0.0.0/0"
+#
+postgresql_admin_cidrs: []
+
+# ---------------------------------------------------------------------------
+# Applications
+# ---------------------------------------------------------------------------
+#
+# Applications should normally connect to:
+#
+#   <POSTGRESQL_VIP>:5432
+#
+# Do NOT guess the Kubernetes Pod CIDR.
+# Depending on CNI/SNAT, the DB network may see:
+#   - Pod IP,
+#   - Worker Node IP,
+#   - NAT/Gateway IP.
+#
+# Example after verification:
+#
+# postgresql_application_cidrs:
+#   - "<VERIFIED_APPLICATION_SOURCE_CIDR>"
+#
+postgresql_application_cidrs: []
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+#
+# Keep empty until the monitoring stack exists.
+#
+# Example:
+#
+# postgresql_monitoring_cidrs:
+#   - "<PROMETHEUS_OR_MONITORING_SOURCE>/32"
+#
+postgresql_monitoring_cidrs: []
+
+# ---------------------------------------------------------------------------
+# Exceptional / extra sources
+# ---------------------------------------------------------------------------
+#
+# Use only for reviewed exceptions with a documented reason.
+#
+# Example:
+#
+# postgresql_network_extra_cidrs:
+#   - "<APPROVED_HOST>/32"
+#
+postgresql_network_extra_cidrs: []
+
+# ---------------------------------------------------------------------------
+# Notes for future enforcement
+# ---------------------------------------------------------------------------
+#
+# Mandatory inter-node HA traffic must remain available between DB nodes:
+#
+#   TCP/5432   PostgreSQL replication / HAProxy backend
+#   TCP/8008   Patroni REST / HAProxy health checks
+#   TCP/2379   etcd client
+#   TCP/2380   etcd peer
+#   IP proto 112 (VRRP) Keepalived
+#
+# SSH TCP/22 should be limited to approved admin sources.
+#
+# After every firewall change:
+#
+#   ansible-playbook \
+#     -i inventory/production/hosts.yml \
+#     playbooks/validate.yml \
+#     --ask-vault-pass -K

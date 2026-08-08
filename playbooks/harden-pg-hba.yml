@@ -1,0 +1,162 @@
+---
+# PostgreSQL pg_hba hardening for an EXISTING Patroni cluster.
+#
+# This playbook intentionally changes pg_hba through Patroni dynamic
+# configuration (DCS). Do not edit PGDATA/pg_hba.conf manually.
+#
+# Usage:
+#   ansible-playbook \
+#     -i inventory/production/hosts.yml \
+#     playbooks/harden-pg-hba.yml \
+#     --ask-vault-pass -K
+#
+# Safe to re-run:
+#   If the desired pg_hba list already matches DCS, no configuration change is
+#   submitted and the playbook remains idempotent.
+
+- name: Harden PostgreSQL client authentication through Patroni DCS
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+
+  vars:
+    patroni_dynamic_pg_hba_file: /etc/patroni/dynamic-pg-hba.yml
+
+  tasks:
+    - name: Start desired pg_hba rule list with secure local authentication
+      ansible.builtin.set_fact:
+        postgresql_hba_desired:
+          - "local all all peer"
+          - "host all all 127.0.0.1/32 scram-sha-256"
+          - "host all all ::1/128 scram-sha-256"
+
+    - name: Add replication, rewind, and HAProxy source rules for every DB node
+      ansible.builtin.set_fact:
+        postgresql_hba_desired: >-
+          {{
+            postgresql_hba_desired
+            + [
+                'host replication ' ~ patroni_replication_username ~ ' '
+                ~ hostvars[item].ansible_host ~ '/32 scram-sha-256',
+                'host all ' ~ patroni_rewind_username ~ ' '
+                ~ hostvars[item].ansible_host ~ '/32 scram-sha-256',
+                'host all all ' ~ hostvars[item].ansible_host
+                ~ '/32 scram-sha-256'
+              ]
+          }}
+      loop: "{{ groups['postgresql_cluster'] }}"
+
+    - name: Add explicitly reviewed optional pg_hba rules
+      ansible.builtin.set_fact:
+        postgresql_hba_desired: >-
+          {{ postgresql_hba_desired + postgresql_hba_additional_rules }}
+
+    - name: Explain why DB-node source rules are required
+      ansible.builtin.debug:
+        msg: >-
+          VIP client traffic is proxied by HAProxy running on the database
+          nodes. PostgreSQL therefore needs to accept authenticated connections
+          sourced from each database-node IP. Application authorization is
+          still controlled by PostgreSQL roles/database privileges.
+
+    - name: Render dynamic pg_hba fragment used by patronictl
+      ansible.builtin.copy:
+        dest: "{{ patroni_dynamic_pg_hba_file }}"
+        owner: postgres
+        group: postgres
+        mode: "0640"
+        content: |
+          # Managed by Ansible.
+          # Applied to Patroni dynamic configuration with `edit-config --apply`.
+          {{ {'postgresql': {'pg_hba': postgresql_hba_desired}} | to_nice_yaml(indent=2, sort_keys=False) | indent(10, false) }}
+
+    - name: Read current Patroni dynamic configuration
+      ansible.builtin.command:
+        argv:
+          - patronictl
+          - -c
+          - /etc/patroni/patroni.yml
+          - show-config
+          - "{{ postgres_cluster_name }}"
+      register: patroni_dynamic_config_raw
+      changed_when: false
+      run_once: true
+
+    - name: Parse currently active dynamic pg_hba rules
+      ansible.builtin.set_fact:
+        patroni_current_dynamic_pg_hba: >-
+          {{
+            (
+              (
+                patroni_dynamic_config_raw.stdout
+                | from_yaml
+              ).postgresql
+              | default({})
+            ).pg_hba
+            | default([])
+          }}
+      run_once: true
+
+    - name: Print pg_hba change summary before applying
+      ansible.builtin.debug:
+        msg:
+          current_dynamic_rules: "{{ patroni_current_dynamic_pg_hba }}"
+          desired_rules: "{{ postgresql_hba_desired }}"
+      run_once: true
+
+    - name: Apply pg_hba to Patroni dynamic configuration only when different
+      ansible.builtin.command:
+        argv:
+          - patronictl
+          - -c
+          - /etc/patroni/patroni.yml
+          - edit-config
+          - "{{ postgres_cluster_name }}"
+          - --apply
+          - "{{ patroni_dynamic_pg_hba_file }}"
+          - --force
+      when: patroni_current_dynamic_pg_hba != postgresql_hba_desired
+      register: patroni_pg_hba_apply
+      changed_when: patroni_current_dynamic_pg_hba != postgresql_hba_desired
+      run_once: true
+
+    - name: Wait until every node has a valid pg_hba file with no trust rules
+      become_user: postgres
+      ansible.builtin.shell: |
+        set -e
+        psql -X -qAt -d postgres <<'SQL'
+        SELECT count(*)
+        FROM pg_hba_file_rules
+        WHERE error IS NOT NULL
+           OR auth_method = 'trust';
+        SQL
+      args:
+        executable: /bin/bash
+      register: pg_hba_security_check
+      changed_when: false
+      retries: 30
+      delay: 2
+      until:
+        - pg_hba_security_check.rc == 0
+        - pg_hba_security_check.stdout | trim == '0'
+
+    - name: Verify Unix-socket peer administration still works
+      become_user: postgres
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -qAt
+          - -d
+          - postgres
+          - -c
+          - SELECT current_user, pg_is_in_recovery();
+      register: local_peer_test
+      changed_when: false
+
+    - name: Print local authentication validation result
+      ansible.builtin.debug:
+        var: local_peer_test.stdout
+
+# Reuse the project's existing end-to-end HA validation.
+- import_playbook: validate.yml

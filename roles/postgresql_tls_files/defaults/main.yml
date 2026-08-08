@@ -1,0 +1,13 @@
+---
+postgresql_tls_certificate_deployment_enabled: false
+postgresql_tls_minimum_validity_days: 30
+postgresql_tls_expected_identities: {}
+
+postgresql_tls_directory: "/etc/postgresql/tls"
+postgresql_tls_server_cert_file: "/etc/postgresql/tls/server.crt"
+postgresql_tls_server_key_file: "/etc/postgresql/tls/server.key"
+postgresql_tls_ca_file: "/etc/postgresql/tls/ca.crt"
+
+postgresql_tls_server_cert_source: ""
+postgresql_tls_server_key_source: ""
+postgresql_tls_ca_source: ""

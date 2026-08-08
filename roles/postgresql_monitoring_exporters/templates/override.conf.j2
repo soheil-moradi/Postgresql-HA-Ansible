@@ -1,0 +1,34 @@
+# Managed by Ansible.
+#
+# Security model:
+# - dedicated unprivileged OS user;
+# - dedicated PostgreSQL LOGIN role without a password;
+# - local Unix-socket connection;
+# - pg_hba local peer authentication;
+# - pg_monitor membership, not PostgreSQL superuser.
+#
+# Any EnvironmentFile inherited from the distro unit is reset so a stale DSN
+# cannot override this peer-auth connection.
+
+[Service]
+User={{ postgresql_exporter_os_user }}
+Group={{ postgresql_exporter_os_user }}
+
+EnvironmentFile=
+Environment="DATA_SOURCE_NAME=host=/var/run/postgresql port=5432 dbname={{ postgresql_exporter_database }} user={{ postgresql_exporter_db_role }} sslmode=disable application_name=postgres_exporter"
+
+ExecStart=
+ExecStart={{ postgresql_exporter_binary }} \
+  --web.listen-address={{ ansible_host }}:{{ postgresql_exporter_port }} \
+  --web.telemetry-path={{ postgresql_exporter_path }} \
+  --collector.database_wraparound \
+  --collector.long_running_transactions \
+  --collector.postmaster \
+  --collector.stat_activity_autovacuum \
+  --collector.stat_wal_receiver
+
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true

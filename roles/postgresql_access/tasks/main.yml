@@ -1,0 +1,190 @@
+---
+- name: Explain why PostgreSQL access management is disabled
+  ansible.builtin.debug:
+    msg: >-
+      PostgreSQL database/role management is disabled. No application database
+      or role is created until postgresql_access_management_enabled=true.
+  when: not postgresql_access_management_enabled | bool
+
+- name: Manage PostgreSQL databases and roles on current Patroni Leader
+  when: postgresql_access_management_enabled | bool
+  block:
+    - name: Validate managed role definitions
+      ansible.builtin.assert:
+        that:
+          - item.name is match('^[A-Za-z_][A-Za-z0-9_]*$')
+          - not (item.login | default(false) | bool) or item.password is defined
+          - not (item.login | default(false) | bool) or item.password_version is defined
+          - not (item.login | default(false) | bool) or
+            item.password_version is match('^[A-Za-z0-9_.:-]+$')
+        fail_msg: >-
+          Invalid managed role. Use a simple SQL identifier. LOGIN roles
+          require password and password_version; keep password in Ansible Vault.
+      loop: "{{ postgresql_managed_roles }}"
+      loop_control:
+        label: "{{ item.name | default('undefined') }}"
+      no_log: true
+
+    - name: Validate managed database definitions
+      ansible.builtin.assert:
+        that:
+          - item.name is match('^[A-Za-z_][A-Za-z0-9_]*$')
+          - item.owner is match('^[A-Za-z_][A-Za-z0-9_]*$')
+          - (item.encoding | default('UTF8')) in ['UTF8']
+        fail_msg: >-
+          Invalid database definition. This reusable baseline currently
+          supports UTF8 databases and simple SQL identifiers.
+      loop: "{{ postgresql_managed_databases }}"
+      loop_control:
+        label: "{{ item.name | default('undefined') }}"
+
+    - name: Validate managed memberships
+      ansible.builtin.assert:
+        that:
+          - item.role is match('^[A-Za-z_][A-Za-z0-9_]*$')
+          - item.member is match('^[A-Za-z_][A-Za-z0-9_]*$')
+        fail_msg: "Invalid PostgreSQL membership definition."
+      loop: "{{ postgresql_managed_memberships }}"
+      loop_control:
+        label: "{{ (item.role | default('?')) ~ ' -> ' ~ (item.member | default('?')) }}"
+
+    - name: Validate managed access profiles
+      ansible.builtin.assert:
+        that:
+          - item.database is match('^[A-Za-z_][A-Za-z0-9_]*$')
+          - item.schema is match('^[A-Za-z_][A-Za-z0-9_]*$')
+          - item.owner is match('^[A-Za-z_][A-Za-z0-9_]*$')
+          - item.role is match('^[A-Za-z_][A-Za-z0-9_]*$')
+          - item.level in ['readonly', 'readwrite']
+        fail_msg: >-
+          Invalid access profile. Supported levels: readonly, readwrite.
+      loop: "{{ postgresql_managed_access_profiles }}"
+      loop_control:
+        label: >-
+          {{ (item.database | default('?')) ~ '/' ~
+             (item.schema | default('?')) ~ ':' ~
+             (item.level | default('?')) }}
+
+    - name: Read Patroni cluster topology
+      ansible.builtin.command:
+        argv:
+          - patronictl
+          - -c
+          - /etc/patroni/patroni.yml
+          - list
+          - "{{ postgres_cluster_name }}"
+          - --format
+          - json
+      register: postgresql_access_patroni_topology
+      changed_when: false
+
+    - name: Resolve current Patroni Leader
+      ansible.builtin.set_fact:
+        postgresql_access_leaders: >-
+          {{
+            postgresql_access_patroni_topology.stdout
+            | from_json
+            | selectattr('Role', 'equalto', 'Leader')
+            | map(attribute='Member')
+            | list
+          }}
+
+    - name: Assert exactly one Patroni Leader exists
+      ansible.builtin.assert:
+        that:
+          - postgresql_access_leaders | length == 1
+          - postgresql_access_leaders[0] in groups['postgresql_cluster']
+        fail_msg: >-
+          Exactly one Patroni Leader must be present and mapped to inventory.
+          No database/role changes were attempted.
+
+    - name: Save resolved Patroni Leader
+      ansible.builtin.set_fact:
+        postgresql_access_leader: "{{ postgresql_access_leaders[0] }}"
+
+    - name: Render transient access-management SQL on Leader
+      ansible.builtin.template:
+        src: managed-access.sql.j2
+        dest: "{{ postgresql_access_sql_file }}"
+        owner: postgres
+        group: postgres
+        mode: "0600"
+      delegate_to: "{{ postgresql_access_leader | default(inventory_hostname) }}"
+      no_log: true
+
+    - name: Apply access-management SQL on Leader
+      become_user: postgres
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -v
+          - ON_ERROR_STOP=1
+          - -d
+          - postgres
+          - -f
+          - "{{ postgresql_access_sql_file }}"
+      delegate_to: "{{ postgresql_access_leader | default(inventory_hostname) }}"
+      register: postgresql_access_apply
+      changed_when: >-
+        'ANSIBLE_MANAGED_CHANGE' in
+        (postgresql_access_apply.stdout ~ postgresql_access_apply.stderr)
+        or 'CREATE DATABASE' in postgresql_access_apply.stdout
+      no_log: true
+
+    - name: Validate managed roles exist
+      become_user: postgres
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -qAt
+          - -d
+          - postgres
+          - -c
+          - >-
+            SELECT count(*) FROM pg_roles
+            WHERE rolname = '{{ item.name }}';
+      delegate_to: "{{ postgresql_access_leader | default(inventory_hostname) }}"
+      register: postgresql_access_role_check
+      changed_when: false
+      failed_when: postgresql_access_role_check.stdout | trim != '1'
+      loop: "{{ postgresql_managed_roles }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Validate managed databases and owners
+      become_user: postgres
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -qAt
+          - -d
+          - postgres
+          - -c
+          - >-
+            SELECT count(*)
+            FROM pg_database d
+            JOIN pg_roles r ON r.oid = d.datdba
+            WHERE d.datname = '{{ item.name }}'
+              AND r.rolname = '{{ item.owner }}'
+              AND pg_encoding_to_char(d.encoding) = '{{ item.encoding | default("UTF8") }}';
+      delegate_to: "{{ postgresql_access_leader | default(inventory_hostname) }}"
+      register: postgresql_access_database_check
+      changed_when: false
+      failed_when: postgresql_access_database_check.stdout | trim != '1'
+      loop: "{{ postgresql_managed_databases }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+  always:
+    - name: Remove transient SQL file from Leader
+      ansible.builtin.file:
+        path: "{{ postgresql_access_sql_file }}"
+        state: absent
+      delegate_to: "{{ postgresql_access_leader | default(inventory_hostname) }}"
+      when:
+        - postgresql_access_management_enabled | bool
+        - postgresql_access_leader is defined
+      no_log: true

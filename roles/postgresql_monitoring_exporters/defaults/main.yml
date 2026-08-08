@@ -1,0 +1,10 @@
+---
+postgresql_exporter_enabled: true
+postgresql_exporter_package: "prometheus-postgres-exporter"
+postgresql_exporter_service: "prometheus-postgres-exporter"
+postgresql_exporter_binary: "/usr/bin/prometheus-postgres-exporter"
+postgresql_exporter_port: 9187
+postgresql_exporter_path: "/metrics"
+postgresql_exporter_os_user: "postgres_exporter"
+postgresql_exporter_db_role: "postgres_exporter"
+postgresql_exporter_database: "postgres"

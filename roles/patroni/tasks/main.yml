@@ -1,0 +1,112 @@
+---
+- name: Install postgresql-common before the server package
+  ansible.builtin.apt:
+    name: postgresql-common
+    state: present
+    policy_rc_d: 101
+
+- name: Disable automatic creation of the Debian PostgreSQL main cluster
+  ansible.builtin.lineinfile:
+    path: /etc/postgresql-common/createcluster.conf
+    regexp: '^#?create_main_cluster\s*='
+    line: 'create_main_cluster = false'
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install PostgreSQL, Patroni, and Python driver packages
+  ansible.builtin.apt:
+    name:
+      - patroni
+      - postgresql-{{ postgresql_version }}
+      - postgresql-client-{{ postgresql_version }}
+      - python3-etcd
+      - python3-psycopg2
+    state: present
+    policy_rc_d: 101
+
+- name: Stop and disable the distro PostgreSQL wrapper service
+  ansible.builtin.systemd_service:
+    name: postgresql
+    enabled: false
+    state: stopped
+  failed_when: false
+
+- name: Detect an already initialized Patroni-managed PostgreSQL node
+  ansible.builtin.stat:
+    path: "{{ postgres_mount_point }}/{{ postgresql_version }}/patroni/PG_VERSION"
+  register: patroni_pg_version_file
+
+- name: Stop Patroni only before first-time initialization
+  ansible.builtin.systemd_service:
+    name: patroni
+    state: stopped
+  when: not patroni_pg_version_file.stat.exists
+  failed_when: false
+
+- name: Ensure PostgreSQL directory ownership on the dedicated mount
+  ansible.builtin.file:
+    path: "{{ postgres_mount_point }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0750"
+
+- name: Create Patroni-managed PostgreSQL data directory
+  ansible.builtin.file:
+    path: "{{ postgres_mount_point }}/{{ postgresql_version }}/patroni"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0700"
+
+- name: Create PostgreSQL log directory for future central log shipping
+  ansible.builtin.file:
+    path: /var/log/postgresql
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0750"
+
+- name: Create Patroni configuration directory
+  ansible.builtin.file:
+    path: /etc/patroni
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0750"
+
+- name: Render Patroni and PostgreSQL cluster configuration
+  ansible.builtin.template:
+    src: patroni.yml.j2
+    dest: /etc/patroni/patroni.yml
+    owner: postgres
+    group: postgres
+    mode: "0600"
+  no_log: true
+  notify: Reload Patroni if running
+
+- name: Install dedicated Patroni systemd unit
+  ansible.builtin.template:
+    src: patroni.service.j2
+    dest: /etc/systemd/system/patroni.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Reload systemd unit definitions
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Enable Patroni without forcing a start
+  ansible.builtin.systemd_service:
+    name: patroni
+    enabled: true
+
+- name: Verify Patroni YAML can be parsed
+  ansible.builtin.command: >-
+    python3 -c "import yaml; yaml.safe_load(open('/etc/patroni/patroni.yml'))"
+  changed_when: false
+  no_log: true

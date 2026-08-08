@@ -1,0 +1,31 @@
+---
+- name: Audit OS SSH and AppArmor security state
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Read effective SSH security settings
+      ansible.builtin.shell: |
+        set -euo pipefail
+        sshd -T | egrep \
+          '^(permitrootlogin|passwordauthentication|kbdinteractiveauthentication|x11forwarding|maxauthtries) '
+      args:
+        executable: /bin/bash
+      register: audit_sshd
+      changed_when: false
+
+    - name: Read AppArmor status
+      ansible.builtin.command:
+        argv: [aa-status]
+      register: audit_apparmor
+      changed_when: false
+      failed_when: false
+
+    - name: Print OS hardening audit
+      ansible.builtin.debug:
+        msg:
+          node: "{{ inventory_hostname }}"
+          sshd: "{{ audit_sshd.stdout_lines }}"
+          apparmor: "{{ audit_apparmor.stdout_lines[:20] }}"
+          node_exporter: "not managed by this project"

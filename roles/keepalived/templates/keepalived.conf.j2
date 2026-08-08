@@ -1,0 +1,48 @@
+global_defs {
+    router_id {{ inventory_hostname }}
+    enable_script_security
+    script_user root
+}
+
+vrrp_script chk_haproxy {
+    script "/usr/local/sbin/check_haproxy.sh"
+    interval 2
+    timeout 2
+    fall 3
+    rise 2
+}
+
+vrrp_instance VI_POSTGRESQL {
+    state BACKUP
+    interface {{ keepalived_interface }}
+    virtual_router_id {{ keepalived_virtual_router_id }}
+    priority {{ keepalived_priority }}
+    advert_int {{ keepalived_advert_interval }}
+{% if keepalived_nopreempt | bool %}
+    nopreempt
+{% endif %}
+
+    unicast_src_ip {{ ansible_host }}
+    unicast_peer {
+{% for host in groups['postgresql_cluster'] if host != inventory_hostname %}
+        {{ hostvars[host].ansible_host }}
+{% endfor %}
+    }
+
+    authentication {
+        auth_type PASS
+        auth_pass {{ vault_keepalived_auth_password }}
+    }
+
+    virtual_ipaddress {
+        {{ postgres_cluster_vip }}/{{ postgres_cluster_vip_prefix }} dev {{ keepalived_interface }}
+    }
+
+    track_script {
+        chk_haproxy
+    }
+
+    garp_master_delay 1
+    garp_master_repeat 3
+    garp_master_refresh 60
+}

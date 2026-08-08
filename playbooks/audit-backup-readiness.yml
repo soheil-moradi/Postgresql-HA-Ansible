@@ -1,0 +1,47 @@
+---
+- name: Audit PostgreSQL native backup and WAL archive readiness
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Read archive settings and status
+      become_user: postgres
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -qAt
+          - -d
+          - postgres
+          - -c
+          - >-
+            SELECT json_build_object(
+              'archive_mode', current_setting('archive_mode'),
+              'archive_command', current_setting('archive_command'),
+              'archive_timeout', current_setting('archive_timeout'),
+              'wal_level', current_setting('wal_level'),
+              'archived_count', (SELECT archived_count FROM pg_stat_archiver),
+              'failed_count', (SELECT failed_count FROM pg_stat_archiver),
+              'last_archived_wal', (SELECT last_archived_wal FROM pg_stat_archiver),
+              'last_archived_time', (SELECT last_archived_time FROM pg_stat_archiver),
+              'last_failed_wal', (SELECT last_failed_wal FROM pg_stat_archiver),
+              'last_failed_time', (SELECT last_failed_time FROM pg_stat_archiver)
+            );
+      register: backup_status
+      changed_when: false
+
+    - name: Read pg_basebackup version
+      ansible.builtin.command:
+        argv: [pg_basebackup, --version]
+      register: pg_basebackup_version
+      changed_when: false
+
+    - name: Print backup readiness
+      ansible.builtin.debug:
+        msg:
+          node: "{{ inventory_hostname }}"
+          status: "{{ backup_status.stdout | from_json }}"
+          pg_basebackup: "{{ pg_basebackup_version.stdout }}"
+          management_enabled: "{{ postgresql_backup_management_enabled }}"
+          destination: "{{ postgresql_backup_destination }}"

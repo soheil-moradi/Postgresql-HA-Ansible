@@ -1,0 +1,77 @@
+---
+# PostgreSQL access-management EXAMPLE ONLY.
+#
+# Copy reviewed definitions into inventory group_vars. Do not load this file
+# directly as production configuration.
+
+postgresql_access_management_enabled: false
+
+# Recommended model:
+#
+#   service_owner  -> NOLOGIN, owns objects
+#   service_rw     -> NOLOGIN, carries privileges
+#   service_login  -> LOGIN, application credential
+#
+postgresql_managed_roles: []
+
+# Example:
+#
+# postgresql_managed_roles:
+#   - name: example_app_owner
+#     login: false
+#
+#   - name: example_app_rw
+#     login: false
+#
+#   - name: example_app_login
+#     login: true
+#     password: "{{ vault_example_app_db_password }}"
+#     password_version: "v1"
+#     connection_limit: 30
+#
+# Password rotation:
+#   1. change vault_example_app_db_password in encrypted Vault;
+#   2. increment password_version, e.g. v1 -> v2;
+#   3. run manage-postgresql-access.yml.
+
+postgresql_managed_databases: []
+
+# Example:
+#
+# postgresql_managed_databases:
+#   - name: example_app
+#     owner: example_app_owner
+#     encoding: UTF8
+#     revoke_public_connect: true
+
+postgresql_managed_memberships: []
+
+# Example:
+#
+# postgresql_managed_memberships:
+#   - role: example_app_rw
+#     member: example_app_login
+#     admin_option: false
+
+postgresql_managed_access_profiles: []
+
+# Read/write:
+#
+# postgresql_managed_access_profiles:
+#   - database: example_app
+#     schema: public
+#     owner: example_app_owner
+#     role: example_app_rw
+#     level: readwrite
+#
+# Read-only:
+#
+#   - database: example_app
+#     schema: public
+#     owner: example_app_owner
+#     role: example_reporting_ro
+#     level: readonly
+#
+# IMPORTANT:
+# `owner` must be the role that actually CREATES future objects. PostgreSQL
+# ALTER DEFAULT PRIVILEGES applies to objects created by that target role.

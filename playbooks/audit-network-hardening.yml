@@ -1,0 +1,106 @@
+---
+# Read-only network-hardening audit.
+#
+# This playbook does NOT enable UFW, nftables, or change network settings.
+#
+# Usage:
+#   ansible-playbook \
+#     -i inventory/production/hosts.yml \
+#     playbooks/audit-network-hardening.yml \
+#     --ask-vault-pass -K
+
+- name: Audit network exposure before firewall enforcement
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Read the current SSH connection tuple before privilege escalation
+      # WHY:
+      #   sudo commonly removes SSH_CONNECTION from the environment. Run this
+      #   task as the Ansible SSH user so we see the source address that the
+      #   database node actually receives from sshd.
+      become: false
+      ansible.builtin.shell: |
+        printf '%s\n' "${SSH_CONNECTION:-unknown}"
+      args:
+        executable: /bin/bash
+      register: network_audit_ssh_connection
+      changed_when: false
+
+    - name: Read established SSH peers as a verification fallback
+      # This is read-only. Review the result before using it in firewall rules.
+      ansible.builtin.shell: |
+        ss -tnH state established '( sport = :22 )' || true
+      args:
+        executable: /bin/bash
+      register: network_audit_ssh_peers
+      changed_when: false
+
+    - name: Read listening HA service sockets
+      ansible.builtin.shell: |
+        ss -lntp | egrep '(:22|:5432|:8008|:2379|:2380)' || true
+      args:
+        executable: /bin/bash
+      register: network_audit_listeners
+      changed_when: false
+
+    - name: Detect current VIP ownership
+      ansible.builtin.shell: |
+        ip -o -4 addr show | grep -F -- "{{ postgres_cluster_vip }}" || true
+      args:
+        executable: /bin/bash
+      register: network_audit_vip
+      changed_when: false
+
+    - name: Read UFW status
+      ansible.builtin.command:
+        argv: [ufw, status, verbose]
+      register: network_audit_ufw
+      changed_when: false
+      failed_when: false
+
+    - name: Read nftables ruleset
+      ansible.builtin.command:
+        argv: [nft, list, ruleset]
+      register: network_audit_nft
+      changed_when: false
+      failed_when: false
+
+    - name: Print per-node network audit summary
+      ansible.builtin.debug:
+        msg:
+          node: "{{ inventory_hostname }}"
+          node_ip: "{{ ansible_host }}"
+          default_interface: "{{ ansible_facts['default_ipv4']['interface'] }}"
+          default_gateway: "{{ ansible_facts['default_ipv4']['gateway'] | default('unknown') }}"
+          ssh_connection: "{{ network_audit_ssh_connection.stdout }}"
+          established_ssh_sessions: "{{ network_audit_ssh_peers.stdout_lines }}"
+          vip_owned_here: "{{ network_audit_vip.stdout | length > 0 }}"
+          listeners: "{{ network_audit_listeners.stdout_lines }}"
+          ufw: "{{ network_audit_ufw.stdout_lines }}"
+          nft_rule_count: "{{ network_audit_nft.stdout_lines | length }}"
+
+- name: Summarize cluster firewall inputs
+  hosts: postgresql_cluster[0]
+  become: false
+  gather_facts: false
+
+  tasks:
+    - name: Print reviewed inputs required before enforcement
+      ansible.builtin.debug:
+        msg:
+          db_node_sources: >-
+            {{
+              groups['postgresql_cluster']
+              | map('extract', hostvars, 'ansible_host')
+              | list
+            }}
+          vip: "{{ postgres_cluster_vip }}"
+          admin_cidrs_configured: "{{ postgresql_admin_cidrs }}"
+          application_cidrs_configured: "{{ postgresql_application_cidrs }}"
+          monitoring_cidrs_configured: "{{ postgresql_monitoring_cidrs }}"
+          enforcement_enabled: "{{ postgresql_network_hardening_enforce }}"
+          next_action: >-
+            Review the SSH source seen on all nodes. Do not enable firewall
+            enforcement until the management source CIDR is confirmed.

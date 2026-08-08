@@ -1,0 +1,79 @@
+---
+- name: Install etcd packages without auto-starting services
+  ansible.builtin.apt:
+    name:
+      - etcd-client
+      - etcd-server
+    state: present
+    policy_rc_d: 101
+
+- name: Create etcd data directory
+  ansible.builtin.file:
+    path: "{{ etcd_data_dir }}"
+    state: directory
+    owner: etcd
+    group: etcd
+    mode: "0700"
+
+- name: Detect whether etcd was already running before configuration
+  ansible.builtin.command: systemctl is-active etcd
+  changed_when: false
+  failed_when: false
+  register: etcd_was_active
+
+- name: Configure etcd cluster member
+  ansible.builtin.template:
+    src: etcd.j2
+    dest: /etc/default/etcd
+    owner: root
+    group: root
+    mode: "0640"
+  register: etcd_config_result
+
+- name: Enable and start etcd
+  ansible.builtin.systemd_service:
+    name: etcd
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Rolling restart an existing etcd member only when its configuration changed
+  ansible.builtin.shell: |
+    set -e
+    systemctl restart etcd
+    for attempt in $(seq 1 30); do
+      if ETCDCTL_API=3 etcdctl         --endpoints=http://127.0.0.1:{{ etcd_client_port }}         endpoint health >/dev/null 2>&1; then
+        exit 0
+      fi
+      sleep 2
+    done
+    echo "etcd did not become healthy after restart" >&2
+    exit 1
+  args:
+    executable: /bin/bash
+  when:
+    - etcd_config_result.changed
+    - etcd_was_active.rc == 0
+  changed_when: true
+  throttle: 1
+
+- name: Wait for local etcd client port
+  ansible.builtin.wait_for:
+    host: "{{ ansible_host }}"
+    port: "{{ etcd_client_port }}"
+    timeout: 60
+
+- name: Wait for etcd quorum health
+  ansible.builtin.command:
+    cmd: >-
+      etcdctl
+      --endpoints={{ etcd_client_endpoints_csv }}
+      endpoint health
+  environment:
+    ETCDCTL_API: "3"
+  changed_when: false
+  register: etcd_quorum_health
+  retries: 20
+  delay: 3
+  until: etcd_quorum_health.rc == 0
+  run_once: true

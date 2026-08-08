@@ -1,0 +1,27 @@
+---
+# PostgreSQL TLS activation EXAMPLE ONLY.
+#
+# This file contains no real certificate material.
+
+# Stage 0: no activation.
+postgresql_tls_activation_enabled: false
+
+# Required files must already exist on every DB node before activation:
+#
+# /etc/postgresql/tls/server.crt
+# /etc/postgresql/tls/server.key
+#
+# Desired server TLS baseline:
+postgresql_tls_min_protocol_version: "TLSv1.2"
+
+# IMPORTANT:
+# Leave false during initial activation.
+# Change to true only after TLS is active and verified on all nodes.
+postgresql_tls_require_ssl: false
+
+# Long-term internal Patroni/libpq target after CA/SAN validation:
+#
+# postgresql_tls_internal_sslmode: "verify-full"
+#
+# Initial/default stage:
+postgresql_tls_internal_sslmode: "prefer"

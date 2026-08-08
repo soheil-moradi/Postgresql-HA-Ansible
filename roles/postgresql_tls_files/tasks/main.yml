@@ -1,0 +1,185 @@
+---
+- name: Explain why PostgreSQL TLS certificate deployment is disabled
+  ansible.builtin.debug:
+    msg: >-
+      TLS certificate deployment is disabled. No certificate, key, CA file,
+      PostgreSQL setting, pg_hba rule, or service state is changed.
+  when: not postgresql_tls_certificate_deployment_enabled | bool
+
+- name: Deploy and validate PostgreSQL TLS certificate files
+  when: postgresql_tls_certificate_deployment_enabled | bool
+  block:
+    - name: Validate TLS certificate source inputs
+      ansible.builtin.assert:
+        that:
+          - postgresql_tls_server_cert_source | length > 0
+          - postgresql_tls_server_key_source | length > 0
+          - postgresql_tls_ca_source | length > 0
+          - postgresql_tls_minimum_validity_days | int >= 1
+        fail_msg: >-
+          Configure server certificate, private key, CA source, and validity
+          threshold before enabling certificate deployment.
+
+    - name: Create PostgreSQL TLS directory
+      ansible.builtin.file:
+        path: "{{ postgresql_tls_directory }}"
+        state: directory
+        owner: root
+        group: postgres
+        mode: "0750"
+
+    - name: Deploy PostgreSQL server certificate
+      ansible.builtin.copy:
+        src: "{{ postgresql_tls_server_cert_source }}"
+        dest: "{{ postgresql_tls_server_cert_file }}"
+        owner: root
+        group: postgres
+        mode: "0644"
+
+    - name: Deploy PostgreSQL server private key
+      ansible.builtin.copy:
+        src: "{{ postgresql_tls_server_key_source }}"
+        dest: "{{ postgresql_tls_server_key_file }}"
+        owner: postgres
+        group: postgres
+        mode: "0600"
+      no_log: true
+
+    - name: Deploy CA bundle for Patroni and libpq verification
+      ansible.builtin.copy:
+        src: "{{ postgresql_tls_ca_source }}"
+        dest: "{{ postgresql_tls_ca_file }}"
+        owner: root
+        group: postgres
+        mode: "0644"
+
+    - name: Validate server certificate PEM
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ postgresql_tls_server_cert_file }}"
+          - -noout
+          - -subject
+          - -issuer
+          - -dates
+      changed_when: false
+
+    - name: Validate server private key PEM
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - pkey
+          - -in
+          - "{{ postgresql_tls_server_key_file }}"
+          - -noout
+          - -check
+      changed_when: false
+      no_log: true
+
+    - name: Validate CA bundle PEM
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ postgresql_tls_ca_file }}"
+          - -noout
+          - -subject
+      changed_when: false
+
+    - name: Read certificate public-key fingerprint
+      ansible.builtin.shell: |
+        set -euo pipefail
+        openssl x509 -in "{{ postgresql_tls_server_cert_file }}" -pubkey -noout \
+        | openssl pkey -pubin -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}'
+      args:
+        executable: /bin/bash
+      register: postgresql_tls_cert_pubkey
+      changed_when: false
+
+    - name: Read private-key public-key fingerprint
+      ansible.builtin.shell: |
+        set -euo pipefail
+        openssl pkey -in "{{ postgresql_tls_server_key_file }}" -pubout -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}'
+      args:
+        executable: /bin/bash
+      register: postgresql_tls_key_pubkey
+      changed_when: false
+      no_log: true
+
+    - name: Assert certificate matches private key
+      ansible.builtin.assert:
+        that:
+          - postgresql_tls_cert_pubkey.stdout | trim ==
+            postgresql_tls_key_pubkey.stdout | trim
+        fail_msg: "PostgreSQL certificate and private key do not match."
+
+    - name: Reject near-expiry server certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ postgresql_tls_server_cert_file }}"
+          - -noout
+          - -checkend
+          - "{{ (postgresql_tls_minimum_validity_days | int) * 86400 }}"
+      changed_when: false
+
+    - name: Validate expected DNS SAN identities
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ postgresql_tls_server_cert_file }}"
+          - -noout
+          - -checkhost
+          - "{{ item }}"
+      loop: "{{ postgresql_tls_expected_identities.get(inventory_hostname, {}).get('dns', []) }}"
+      loop_control:
+        label: "{{ item }}"
+      changed_when: false
+
+    - name: Validate expected IP SAN identities
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ postgresql_tls_server_cert_file }}"
+          - -noout
+          - -checkip
+          - "{{ item }}"
+      loop: "{{ postgresql_tls_expected_identities.get(inventory_hostname, {}).get('ip', []) }}"
+      loop_control:
+        label: "{{ item }}"
+      changed_when: false
+
+    - name: Print validated certificate metadata
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ postgresql_tls_server_cert_file }}"
+          - -noout
+          - -subject
+          - -issuer
+          - -dates
+          - -ext
+          - subjectAltName
+      register: postgresql_tls_metadata
+      changed_when: false
+
+    - name: Show TLS certificate readiness
+      ansible.builtin.debug:
+        msg:
+          node: "{{ inventory_hostname }}"
+          expected_identities: "{{ postgresql_tls_expected_identities.get(inventory_hostname, {}) }}"
+          metadata: "{{ postgresql_tls_metadata.stdout_lines }}"
+          note: "Files are validated; PostgreSQL TLS is still not enabled."

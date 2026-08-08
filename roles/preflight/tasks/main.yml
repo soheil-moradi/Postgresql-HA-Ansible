@@ -1,0 +1,375 @@
+---
+- name: Assert exactly three PostgreSQL nodes are defined
+  ansible.builtin.assert:
+    that:
+      - groups['postgresql_cluster'] | length == 3
+      - groups['postgresql_cluster'] | unique | length == 3
+    fail_msg: "This inventory must contain exactly three unique PostgreSQL nodes."
+  run_once: true
+
+- name: Assert required non-secret variables are present
+  ansible.builtin.assert:
+    that:
+      - ansible_host is defined
+      - node_fqdn is defined
+      - postgres_data_device is defined
+      - postgres_cluster_vip is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+      - postgres_cluster_dns_name | length > 0
+      - postgres_client_cidrs | length > 0
+    fail_msg: "Complete hosts.yml and group_vars/all/main.yml before deployment."
+
+- name: Assert secret variables were loaded from Ansible Vault
+  ansible.builtin.assert:
+    that:
+      - vault_postgres_superuser_password is defined
+      - vault_postgres_replication_password is defined
+      - vault_postgres_rewind_password is defined
+      - vault_patroni_rest_password is defined
+      - vault_keepalived_auth_password is defined
+      - vault_keepalived_auth_password | length == 8
+      - "'CHANGE_ME' not in vault_postgres_superuser_password"
+      - "'CHANGE_ME' not in vault_postgres_replication_password"
+      - "'CHANGE_ME' not in vault_postgres_rewind_password"
+      - "'CHANGE_ME' not in vault_patroni_rest_password"
+      - "'CHANGE' not in vault_keepalived_auth_password"
+    fail_msg: "Create and encrypt vault.yml with real random secrets."
+  no_log: true
+
+- name: Assert the target is Ubuntu 24.04
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_version'] is version(required_ubuntu_release, '==')
+    fail_msg: >-
+      Expected Ubuntu {{ required_ubuntu_release }}, found
+      {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}.
+
+- name: Assert CPU and RAM meet the baseline
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['processor_vcpus'] | int >= preflight_min_vcpus | int
+      - ansible_facts['memtotal_mb'] | int >= preflight_min_memory_mb | int
+    fail_msg: >-
+      Node requires at least {{ preflight_min_vcpus }} vCPU and
+      {{ preflight_min_memory_mb }} MiB RAM.
+
+- name: Assert every node has a unique IP and FQDN
+  ansible.builtin.assert:
+    that:
+      - >-
+        groups['postgresql_cluster']
+        | map('extract', hostvars, 'ansible_host')
+        | unique | length == groups['postgresql_cluster'] | length
+      - >-
+        groups['postgresql_cluster']
+        | map('extract', hostvars, 'node_fqdn')
+        | unique | length == groups['postgresql_cluster'] | length
+  run_once: true
+
+- name: Resolve every cluster FQDN through configured DNS
+  ansible.builtin.command: "getent ahostsv4 {{ hostvars[item].node_fqdn }}"
+  loop: "{{ groups['postgresql_cluster'] }}"
+  changed_when: false
+  register: fqdn_resolution
+
+- name: Assert each FQDN resolves to its inventory IP
+  ansible.builtin.assert:
+    that:
+      - hostvars[item.item].ansible_host in item.stdout
+    fail_msg: >-
+      {{ hostvars[item.item].node_fqdn }} does not resolve to
+      {{ hostvars[item.item].ansible_host }} on {{ inventory_hostname }}.
+  loop: "{{ fqdn_resolution.results }}"
+
+- name: Test ICMP reachability to every other cluster node
+  ansible.builtin.command: "ping -c 2 -W 2 {{ hostvars[item].ansible_host }}"
+  loop: "{{ groups['postgresql_cluster'] | difference([inventory_hostname]) }}"
+  changed_when: false
+
+- name: Read local IPv4 addresses for VIP ownership check
+  ansible.builtin.command: "ip -o -4 addr show"
+  changed_when: false
+  register: local_ipv4_addresses
+
+- name: Record whether this node currently owns the PostgreSQL VIP
+  ansible.builtin.set_fact:
+    preflight_vip_is_local: "{{ postgres_cluster_vip in local_ipv4_addresses.stdout }}"
+
+- name: Check Keepalived service state without changing it
+  ansible.builtin.command: "systemctl is-active keepalived"
+  changed_when: false
+  failed_when: false
+  register: preflight_keepalived_state
+
+- name: Check whether Keepalived configuration declares the PostgreSQL VIP
+  ansible.builtin.command:
+    argv:
+      - grep
+      - --fixed-strings
+      - --quiet
+      - --
+      - "{{ postgres_cluster_vip }}"
+      - /etc/keepalived/keepalived.conf
+  changed_when: false
+  failed_when: false
+  register: preflight_keepalived_vip_config
+
+- name: Count PostgreSQL nodes currently owning the VIP
+  ansible.builtin.set_fact:
+    preflight_vip_owner_count: >-
+      {{
+        groups['postgresql_cluster']
+        | map('extract', hostvars, 'preflight_vip_is_local')
+        | select('equalto', true)
+        | list
+        | length
+      }}
+
+- name: Assert the VIP is owned by at most one PostgreSQL node
+  ansible.builtin.assert:
+    that:
+      - preflight_vip_owner_count | int <= 1
+    fail_msg: >-
+      VIP {{ postgres_cluster_vip }} is configured on more than one PostgreSQL
+      node. Stop here and investigate Keepalived/VRRP before making changes.
+  run_once: true
+
+- name: Assert an existing cluster VIP is managed by Keepalived
+  ansible.builtin.assert:
+    that:
+      - preflight_allow_existing_managed_vip | bool
+      - preflight_keepalived_state.rc == 0
+      - preflight_keepalived_vip_config.rc == 0
+    fail_msg: >-
+      VIP {{ postgres_cluster_vip }} exists on {{ inventory_hostname }}, but it
+      is not confirmed as a managed Keepalived VIP. Do not continue until the
+      source of the address is understood.
+  when: preflight_vip_is_local | bool
+
+- name: Probe the reserved or managed VIP with ICMP
+  ansible.builtin.command: "ping -c 2 -W 1 {{ postgres_cluster_vip }}"
+  changed_when: false
+  failed_when: false
+  register: vip_ping
+
+- name: Assert an unused VIP does not answer before first deployment
+  ansible.builtin.assert:
+    that:
+      - vip_ping.rc != 0
+    fail_msg: >-
+      VIP {{ postgres_cluster_vip }} answers ICMP but is not owned by any
+      PostgreSQL cluster node. Verify that another host is not already using
+      this address. Set preflight_require_vip_unresponsive=false only when ICMP
+      behavior is intentionally misleading.
+  when:
+    - preflight_require_vip_unresponsive | bool
+    - preflight_vip_owner_count | int == 0
+
+- name: Report existing managed VIP during an idempotent rerun
+  ansible.builtin.debug:
+    msg: >-
+      VIP {{ postgres_cluster_vip }} is already active on
+      {{ inventory_hostname }} and is managed by Keepalived; this is expected
+      for an already-deployed cluster.
+  when: preflight_vip_is_local | bool
+
+- name: Require at least one repository probe URL when probing is mandatory
+  ansible.builtin.assert:
+    that:
+      - repository_probe_urls | length > 0
+    fail_msg: "repository_probe_urls must contain an internal or Internet repository URL."
+  when: repository_probe_require_any | bool
+
+- name: Verify at least one repository probe URL is reachable
+  ansible.builtin.uri:
+    url: "{{ item }}"
+    method: GET
+    return_content: false
+    follow_redirects: all
+    timeout: 15
+    status_code: [200, 206, 301, 302, 304, 401, 403]
+  loop: "{{ repository_probe_urls }}"
+  register: repository_probe_results
+  failed_when: false
+  changed_when: false
+  when: repository_probe_urls | length > 0
+
+- name: Assert an internal or Internet repository endpoint is reachable
+  ansible.builtin.assert:
+    that:
+      - >-
+        repository_probe_results.results
+        | selectattr('status', 'defined')
+        | selectattr('status', 'in', [200, 206, 301, 302, 304, 401, 403])
+        | list | length > 0
+    fail_msg: >-
+      None of repository_probe_urls was reachable from {{ inventory_hostname }}.
+      Correct the internal repository URL, proxy, DNS, route, or Internet access.
+  when:
+    - repository_probe_require_any | bool
+    - repository_probe_urls | length > 0
+
+- name: Refresh APT metadata without installing packages
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 0
+  changed_when: false
+  register: apt_update_result
+
+- name: Build list of required package names
+  ansible.builtin.set_fact:
+    preflight_required_packages:
+      - apparmor
+      - apparmor-utils
+      - curl
+      - dnsutils
+      - e2fsprogs
+      - xfsprogs
+      - etcd-client
+      - etcd-server
+      - haproxy
+      - iputils-ping
+      - jq
+      - keepalived
+      - lvm2
+      - netcat-openbsd
+      - patroni
+      - postgresql-{{ postgresql_version }}
+      - postgresql-client-{{ postgresql_version }}
+      - postgresql-common
+      - python3-psycopg2
+
+- name: Verify every required package has an APT candidate
+  ansible.builtin.command: "apt-cache policy {{ item }}"
+  loop: "{{ preflight_required_packages }}"
+  changed_when: false
+  register: package_policy
+  failed_when: >-
+    package_policy.rc != 0 or
+    'Candidate: (none)' in package_policy.stdout or
+    'Candidate:' not in package_policy.stdout
+
+- name: Verify the PostgreSQL data device exists
+  ansible.builtin.stat:
+    path: "{{ postgres_data_device }}"
+  register: postgres_data_device_stat
+
+- name: Assert PostgreSQL data device is a block device
+  ansible.builtin.assert:
+    that:
+      - postgres_data_device_stat.stat.exists
+      - postgres_data_device_stat.stat.isblk | default(false)
+    fail_msg: "{{ postgres_data_device }} does not exist or is not a block device."
+
+- name: Read PostgreSQL data device metadata
+  ansible.builtin.command: >-
+    lsblk --bytes --json --output NAME,PATH,TYPE,SIZE,FSTYPE,MOUNTPOINTS,PKNAME
+    {{ postgres_data_device }}
+  changed_when: false
+  register: postgres_data_lsblk_raw
+
+- name: Parse PostgreSQL data device metadata
+  ansible.builtin.set_fact:
+    postgres_data_lsblk: "{{ postgres_data_lsblk_raw.stdout | from_json }}"
+
+- name: Assert target is a sufficiently large whole disk
+  ansible.builtin.assert:
+    that:
+      - postgres_data_lsblk.blockdevices[0].type == 'disk'
+      - postgres_data_lsblk.blockdevices[0].size | int >= preflight_min_data_disk_gb | int * 1000 * 1000 * 1000
+      - postgres_data_lsblk.blockdevices[0].mountpoints | select('string') | list | length == 0
+    fail_msg: >-
+      {{ postgres_data_device }} must be an unmounted whole disk of at least
+      {{ preflight_min_data_disk_gb }} GB.
+
+- name: Read existing signatures without modifying the disk
+  ansible.builtin.command: "wipefs --no-act {{ postgres_data_device }}"
+  changed_when: false
+  register: postgres_data_signatures
+
+- name: Detect whether LVM tools are already installed
+  ansible.builtin.shell: command -v vgs
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  register: preflight_vgs_command
+
+- name: Detect existing target volume group
+  ansible.builtin.command: "vgs --noheadings -o vg_name {{ postgres_vg_name }}"
+  changed_when: false
+  failed_when: false
+  register: existing_postgres_vg
+  when: preflight_vgs_command.rc == 0
+
+- name: Set an absent-volume-group result when LVM tools are not installed yet
+  ansible.builtin.set_fact:
+    existing_postgres_vg:
+      rc: 1
+      stdout: ""
+  when: preflight_vgs_command.rc != 0
+
+- name: Refuse a non-empty unrecognized disk
+  ansible.builtin.assert:
+    that:
+      - >-
+        postgres_data_signatures.stdout | trim | length == 0 or
+        existing_postgres_vg.rc == 0
+    fail_msg: >-
+      {{ postgres_data_device }} contains signatures but is not the expected
+      {{ postgres_vg_name }} volume group. The playbook will not overwrite it.
+
+- name: Require explicit permission before initializing an empty data disk
+  ansible.builtin.assert:
+    that:
+      - postgres_data_disk_allow_initialize | bool
+    fail_msg: >-
+      Set postgres_data_disk_allow_initialize=true only after confirming that
+      {{ postgres_data_device }} is the disposable empty PostgreSQL data disk.
+  when:
+    - postgres_data_signatures.stdout | trim | length == 0
+    - existing_postgres_vg.rc != 0
+
+- name: Check system clock synchronization status
+  ansible.builtin.command: timedatectl show --property=NTPSynchronized --value
+  changed_when: false
+  register: ntp_synchronized
+
+- name: Assert NTP reports synchronized
+  ansible.builtin.assert:
+    that:
+      - ntp_synchronized.stdout | trim == 'yes'
+    fail_msg: "NTP is not synchronized on {{ inventory_hostname }}."
+
+- name: Capture epoch time from every node
+  ansible.builtin.command: date +%s
+  changed_when: false
+  register: node_epoch
+
+- name: Assert clock spread across nodes is within tolerance
+  ansible.builtin.assert:
+    that:
+      - >-
+        (
+          groups['postgresql_cluster']
+          | map('extract', hostvars, 'node_epoch')
+          | map(attribute='stdout')
+          | map('int')
+          | max
+        ) - (
+          groups['postgresql_cluster']
+          | map('extract', hostvars, 'node_epoch')
+          | map(attribute='stdout')
+          | map('int')
+          | min
+        ) <= preflight_max_clock_offset_seconds | int
+    fail_msg: "Clock difference between nodes exceeds the permitted threshold."
+  run_once: true
+
+- name: Print successful preflight summary
+  ansible.builtin.debug:
+    msg:
+      - "Ubuntu, CPU, RAM, DNS, NTP and peer reachability checks passed."
+      - "APT metadata and all required package candidates are available."
+      - "Data disk {{ postgres_data_device }} passed non-destructive safety checks."
+      - "VIP {{ postgres_cluster_vip }} appears unused."

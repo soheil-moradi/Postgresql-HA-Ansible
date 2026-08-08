@@ -1,0 +1,10 @@
+---
+os_hardening_enabled: false
+os_hardening_manage_sshd: false
+os_hardening_sshd_permit_root_login: "no"
+os_hardening_sshd_password_authentication: false
+os_hardening_sshd_kbd_interactive_authentication: false
+os_hardening_sshd_x11_forwarding: false
+os_hardening_sshd_max_auth_tries: 4
+os_hardening_apparmor_enforce_enabled: false
+os_hardening_apparmor_profiles: []

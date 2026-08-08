@@ -1,0 +1,39 @@
+---
+- name: Extend PostgreSQL LVM and ext4 after increasing the VMware disk
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  vars_prompt:
+    - name: confirm_storage_extension
+      prompt: "Type EXTEND to confirm that the VMDK was already enlarged and LVM may consume all free space"
+      private: false
+  tasks:
+    - name: Require explicit confirmation
+      ansible.builtin.assert:
+        that:
+          - confirm_storage_extension == 'EXTEND'
+        fail_msg: "Storage extension was not confirmed."
+
+    - name: Rescan the block device
+      ansible.builtin.command: "blockdev --rereadpt {{ postgres_data_device }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Resize the LVM physical volume
+      ansible.builtin.command: "pvresize {{ postgres_data_device }}"
+      register: pvresize_result
+      changed_when: "'changed' in pvresize_result.stdout | lower"
+
+    - name: Extend logical volume and ext4 filesystem to all free extents
+      community.general.lvol:
+        vg: "{{ postgres_vg_name }}"
+        lv: "{{ postgres_lv_name }}"
+        size: "+100%FREE"
+        resizefs: true
+      register: lvol_extend
+
+    - name: Display the resulting filesystem size
+      ansible.builtin.command: "df -h {{ postgres_mount_point }}"
+      changed_when: false

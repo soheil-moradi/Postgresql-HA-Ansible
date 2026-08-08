@@ -1,0 +1,65 @@
+---
+# PostgreSQL TLS EXAMPLE ONLY.
+#
+# Do not load this file directly as production variables.
+
+postgresql_tls_management_enabled: false
+postgresql_tls_require_ssl: false
+
+postgresql_tls_min_protocol_version: "TLSv1.2"
+
+postgresql_tls_directory: "/etc/postgresql/tls"
+postgresql_tls_server_cert_file: "/etc/postgresql/tls/server.crt"
+postgresql_tls_server_key_file: "/etc/postgresql/tls/server.key"
+postgresql_tls_ca_file: "/etc/postgresql/tls/ca.crt"
+
+# Example repository layout:
+#
+# files/
+# └── tls/
+#     ├── root-ca.crt
+#     ├── pg-node-01.crt
+#     ├── pg-node-01.key
+#     ├── pg-node-02.crt
+#     ├── pg-node-02.key
+#     ├── pg-node-03.crt
+#     └── pg-node-03.key
+#
+# IMPORTANT:
+# Private keys must not be committed to a normal Git repository.
+# Use an approved secret/file delivery mechanism or encrypted artifact store.
+#
+# Example variable shape:
+#
+# postgresql_tls_server_cert_source: "files/tls/{{ inventory_hostname }}.crt"
+# postgresql_tls_server_key_source:  "files/tls/{{ inventory_hostname }}.key"
+# postgresql_tls_ca_source:          "files/tls/root-ca.crt"
+
+postgresql_tls_server_cert_source: ""
+postgresql_tls_server_key_source: ""
+postgresql_tls_ca_source: ""
+
+# Staged internal policy:
+#
+# Phase 1:
+#   prefer
+#
+# Phase 2, after CA/SAN verification:
+#   verify-full
+#
+postgresql_tls_internal_sslmode: "prefer"
+
+# Certificate deployment remains disabled until real PKI material exists.
+postgresql_tls_certificate_deployment_enabled: false
+postgresql_tls_minimum_validity_days: 30
+
+# Optional SAN checks:
+#
+# postgresql_tls_expected_identities:
+#   pg-node-01:
+#     dns:
+#       - "<PG-NODE-01-FQDN>"
+#     ip:
+#       - "<PG-NODE-01-IP>"
+#
+postgresql_tls_expected_identities: {}

@@ -1,0 +1,449 @@
+---
+# -----------------------------------------------------------------------------
+# Ansible connection
+# Replace these values for your environment. Do not put private keys in Git.
+# -----------------------------------------------------------------------------
+ansible_user: ansible
+ansible_port: 22
+ansible_become: true
+ansible_become_method: sudo
+# The sudo password is stored only in the encrypted vault.yml file.
+# Set the vaulted value to an empty string only when this user has NOPASSWD sudo.
+ansible_become_password: "{{ vault_ansible_become_password }}"
+# ansible_ssh_private_key_file: ~/.ssh/postgresql_cluster
+
+# -----------------------------------------------------------------------------
+# Environment identity and network
+# -----------------------------------------------------------------------------
+postgres_cluster_name: pg-internal
+postgres_cluster_vip: 10.10.20.10
+postgres_cluster_dns_name: postgres.example.local
+postgres_cluster_vip_prefix: 24
+
+# Legacy compatibility variable. The hardened HBA template does not consume it.
+# Keep empty; use postgresql_application_cidrs for reviewed network policy and
+# postgresql_hba_additional_rules only for deliberate direct PostgreSQL access.
+postgres_client_cidrs: []
+
+# Internal infrastructure services. Replace all examples.
+dns_servers:
+  - 10.10.1.10
+  - 10.10.1.11
+ntp_servers:
+  - ntp1.example.local
+  - ntp2.example.local
+
+# Keep false when DNS is authoritative and stable. If true, Ansible adds all
+# cluster nodes and the VIP DNS name to /etc/hosts.
+manage_cluster_etc_hosts: false
+
+# -----------------------------------------------------------------------------
+# Repository preflight
+# At least one URL must be reachable from every node. Use the internal InRelease
+# URL, an Internet Ubuntu InRelease URL, or both.
+# -----------------------------------------------------------------------------
+repository_probe_require_any: true
+repository_probe_urls:
+  - http://repo.example.local/ubuntu/dists/noble/InRelease
+  # Internet alternative:
+  # - https://archive.ubuntu.com/ubuntu/dists/noble/InRelease
+
+# This project does not replace apt sources unless explicitly enabled.
+apt_manage_internal_sources: false
+apt_internal_repository_url: http://repo.example.local/ubuntu
+apt_internal_suites:
+  - noble
+  - noble-updates
+  - noble-security
+apt_internal_components:
+  - main
+  - universe
+  - restricted
+  - multiverse
+# Strongly prefer a signed internal repository. When source management is
+# enabled, place the repository key at this path before running the playbook.
+apt_internal_signed_by: /usr/share/keyrings/internal-ubuntu-archive.gpg
+
+# -----------------------------------------------------------------------------
+# Operating system baseline
+# -----------------------------------------------------------------------------
+required_ubuntu_release: "24.04"
+server_timezone: UTC
+manage_timezone: true
+manage_timesyncd: false
+apparmor_manage: true
+postgres_sysctl_swappiness: 1
+
+# -----------------------------------------------------------------------------
+# Storage - destructive initialization requires an explicit true value.
+# The disk must be empty and must not contain partitions/filesystems/signatures.
+# -----------------------------------------------------------------------------
+postgres_data_disk_allow_initialize: false
+postgres_vg_name: vg_postgresql
+postgres_lv_name: lv_postgresql
+postgres_mount_point: /var/lib/postgresql
+postgres_filesystem: xfs
+postgres_mount_options: defaults,noatime
+postgres_ext4_reserved_percent: 1
+
+# -----------------------------------------------------------------------------
+# PostgreSQL / Patroni
+# Ubuntu 24.04's native repository provides PostgreSQL 16. Change only when the
+# internal repository contains and supports another major version.
+# -----------------------------------------------------------------------------
+postgresql_version: 16
+postgresql_port: 5432
+patroni_rest_port: 8008
+patroni_namespace: /service/
+patroni_ttl: 30
+patroni_loop_wait: 10
+patroni_retry_timeout: 10
+patroni_maximum_lag_on_failover: 67108864  # 64 MiB
+patroni_synchronous_mode: true
+patroni_synchronous_mode_strict: false
+patroni_synchronous_node_count: 1
+patroni_superuser_username: postgres
+patroni_replication_username: replicator
+patroni_rewind_username: rewind_user
+patroni_rest_username: patroni_api
+
+# Conservative baseline for 8 vCPU / 32 GiB RAM. Tune from measurements later.
+postgresql_max_connections: 300
+postgresql_shared_buffers: 8GB
+postgresql_effective_cache_size: 24GB
+postgresql_maintenance_work_mem: 1GB
+postgresql_work_mem: 8MB
+postgresql_wal_keep_size: 2GB
+postgresql_max_wal_size: 8GB
+postgresql_min_wal_size: 2GB
+postgresql_log_min_duration_statement_ms: 1000
+
+# -----------------------------------------------------------------------------
+# etcd
+# This initial implementation uses the node network without TLS. Restrict ports
+# 2379/2380 to cluster nodes. TLS/auth hardening can be added as a later phase.
+# -----------------------------------------------------------------------------
+etcd_client_port: 2379
+etcd_peer_port: 2380
+etcd_cluster_token: pg-etcd-cluster-01
+etcd_data_dir: /var/lib/etcd
+
+# Derived endpoint CSV. It is rendered directly from inventory host IPs.
+etcd_client_endpoints_csv: >-
+  {%- for host in groups['postgresql_cluster'] -%}
+  http://{{ hostvars[host].ansible_host }}:{{ etcd_client_port }}{% if not loop.last %},{% endif %}
+  {%- endfor -%}
+
+# -----------------------------------------------------------------------------
+# HAProxy and Keepalived
+# HAProxy binds only to the VIP, so PostgreSQL can still use port 5432 locally.
+# net.ipv4.ip_nonlocal_bind is enabled by the HAProxy role.
+# -----------------------------------------------------------------------------
+haproxy_postgresql_port: 5432
+haproxy_stats_bind: 127.0.0.1
+haproxy_stats_port: 7000
+keepalived_virtual_router_id: 51
+keepalived_advert_interval: 1
+keepalived_interface: "{{ ansible_facts['default_ipv4']['interface'] }}"
+keepalived_nopreempt: true
+
+# -----------------------------------------------------------------------------
+# Preflight safety thresholds
+# -----------------------------------------------------------------------------
+preflight_min_memory_mb: 30000
+preflight_min_vcpus: 8
+preflight_min_data_disk_gb: 190
+preflight_max_clock_offset_seconds: 2
+preflight_require_vip_unresponsive: true
+# Allow site.yml to be safely re-run after Keepalived already owns the VIP.
+# Existing VIPs are accepted only when Keepalived is active and its config
+# explicitly contains postgres_cluster_vip.
+preflight_allow_existing_managed_vip: true
+
+# Ports expected between cluster nodes after deployment.
+cluster_tcp_ports:
+  - "{{ postgresql_port }}"
+  - "{{ patroni_rest_port }}"
+  - "{{ etcd_client_port }}"
+  - "{{ etcd_peer_port }}"
+
+# ---------------------------------------------------------------------------
+# PostgreSQL client authentication (pg_hba.conf)
+# ---------------------------------------------------------------------------
+#
+# WHAT:
+#   Extra pg_hba.conf rules that are not part of the mandatory Patroni HA
+#   rules. The mandatory rules for local administration, replication,
+#   pg_rewind, and traffic forwarded by the local HAProxy instances are built
+#   automatically by playbooks/harden-pg-hba.yml.
+#
+# WHY:
+#   Keep access explicit. Do not allow a whole subnet with "host all all"
+#   unless there is a reviewed requirement.
+#
+# IMPORTANT FOR KUBERNETES:
+#   Applications connect to the PostgreSQL VIP through HAProxy. PostgreSQL
+#   normally sees the HAProxy/database-node IP as the TCP source, not
+#   necessarily the original Pod IP. Network-source restrictions for future
+#   Kubernetes clients should therefore be enforced primarily at the firewall
+#   / HAProxy layer after the real CNI and SNAT behavior is verified.
+#
+# EXAMPLE - allow a deliberately direct reporting connection:
+#
+# postgresql_hba_additional_rules:
+#   - "host reporting reporting_user 10.50.10.0/24 scram-sha-256"
+#
+# BAD EXAMPLES:
+#
+#   - "host all all 0.0.0.0/0 scram-sha-256"
+#   - "host all all 10.50.20.0/24 scram-sha-256"
+#
+# Default:
+#   No additional direct client network is allowed.
+#
+postgresql_hba_additional_rules: []
+
+
+
+# LEGACY NOTE - postgres_client_cidrs
+# -----------------------------------
+# Older revisions of this project rendered postgres_client_cidrs as:
+#   host all all <cidr> scram-sha-256
+# The hardened Patroni template intentionally no longer consumes that variable.
+# Use postgresql_hba_additional_rules for reviewed direct-access exceptions and
+# use the firewall/HAProxy policy for client source-network restrictions.
+
+# ---------------------------------------------------------------------------
+# Host network hardening
+# ---------------------------------------------------------------------------
+#
+# SAFETY MODEL:
+#   Firewall enforcement is deliberately OFF until the management source
+#   network has been audited. Enabling a host firewall with a guessed SSH
+#   source can lock operators and Ansible out of all database nodes.
+#
+# WORKFLOW:
+#   1. Run playbooks/audit-network-hardening.yml.
+#   2. Confirm the real SSH/Ansible source address seen by the DB nodes.
+#   3. Fill postgresql_admin_cidrs with reviewed management CIDRs.
+#   4. Add application/orchestrator and monitoring networks only after their real
+#      routing/SNAT behavior is known.
+#   5. Enable enforcement in a dedicated change.
+#
+postgresql_network_hardening_enforce: false
+
+# Networks allowed to SSH to database nodes.
+#
+# EXAMPLE:
+# postgresql_admin_cidrs:
+#   - "10.10.20.0/24"
+#
+# SAFER EXAMPLE when administration comes from one fixed jump host:
+# postgresql_admin_cidrs:
+#   - "10.10.20.15/32"
+#
+# Do not populate this from memory. Use the network audit first.
+postgresql_admin_cidrs: []
+
+# Networks allowed to reach the PostgreSQL VIP for application traffic.
+#
+# Keep this empty until the real application source network is observed.
+# Do not assume an orchestrator Pod CIDR is the address seen at the database network.
+#
+# EXAMPLE after verification:
+# postgresql_application_cidrs:
+#   - "10.30.40.0/24"
+postgresql_application_cidrs: []
+
+# Networks allowed to scrape PostgreSQL/Patroni/etcd/HAProxy metrics.
+#
+# Keep empty until the central monitoring source addresses are reviewed.
+#
+# EXAMPLE:
+# postgresql_monitoring_cidrs:
+#   - "10.50.60.25/32"
+postgresql_monitoring_cidrs: []
+
+# Optional extra explicitly reviewed source networks.
+#
+# EXAMPLE:
+# postgresql_network_extra_cidrs:
+#   - "10.60.70.10/32"
+postgresql_network_extra_cidrs: []
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL database / role / privilege management
+# ---------------------------------------------------------------------------
+#
+# PURPOSE:
+#   Optional declarative management for application databases, roles,
+#   memberships, and common read-only/read-write privilege profiles.
+#
+# SAFETY:
+#   Disabled by default. Empty lists mean "manage nothing".
+#   This automation intentionally does NOT drop databases or roles.
+#
+# WORKFLOW:
+#   1. Read examples/postgresql-access.yml.example.
+#   2. Define only objects required by the environment.
+#   3. Store LOGIN role passwords in Ansible Vault.
+#   4. Enable this feature explicitly.
+#   5. Run playbooks/manage-postgresql-access.yml.
+#
+postgresql_access_management_enabled: false
+postgresql_managed_roles: []
+postgresql_managed_databases: []
+postgresql_managed_memberships: []
+postgresql_managed_access_profiles: []
+
+# ---------------------------------------------------------------------------
+# PostgreSQL TLS foundation
+# ---------------------------------------------------------------------------
+#
+# This section only defines inputs for a future TLS rollout.
+# TLS is NOT enabled merely by setting certificate paths.
+#
+# Keep disabled until:
+#   - the organization CA/certificate workflow is known;
+#   - certificate SANs are reviewed;
+#   - all three DB nodes have their correct server certificate/key;
+#   - client trust distribution is planned;
+#   - replication/rewind behavior is tested;
+#   - rollback and HA validation are ready.
+#
+postgresql_tls_management_enabled: false
+
+# Enforce TLS-only PostgreSQL HBA rules in a future rollout.
+# Keep false until server-side TLS is already working on every DB node.
+postgresql_tls_require_ssl: false
+
+# PostgreSQL 16 defaults to TLSv1.2 as the minimum when TLS is enabled.
+# Keep explicit here so the intended baseline is documented.
+postgresql_tls_min_protocol_version: "TLSv1.2"
+
+# Destination paths on each database node.
+postgresql_tls_directory: "/etc/postgresql/tls"
+postgresql_tls_server_cert_file: "/etc/postgresql/tls/server.crt"
+postgresql_tls_server_key_file: "/etc/postgresql/tls/server.key"
+postgresql_tls_ca_file: "/etc/postgresql/tls/ca.crt"
+
+# Controller-side source files are intentionally empty.
+# A future operator must point these at organization-approved PEM files.
+#
+# Example:
+# postgresql_tls_server_cert_source: "files/tls/{{ inventory_hostname }}.crt"
+# postgresql_tls_server_key_source:  "files/tls/{{ inventory_hostname }}.key"
+# postgresql_tls_ca_source:          "files/tls/root-ca.crt"
+#
+postgresql_tls_server_cert_source: ""
+postgresql_tls_server_key_source: ""
+postgresql_tls_ca_source: ""
+
+# Internal Patroni/libpq verification policy for replication/rewind.
+#
+# "prefer" preserves the current non-enforcing behavior.
+# Future hardened target is usually "verify-full" after node certificates have
+# SANs matching the hostnames used for PostgreSQL connections and the CA is
+# available on every node.
+postgresql_tls_internal_sslmode: "prefer"
+
+# ---------------------------------------------------------------------------
+# PostgreSQL TLS certificate-file deployment
+# ---------------------------------------------------------------------------
+#
+# SAFETY:
+#   This flag ONLY controls certificate/key/CA file deployment and validation.
+#   It does not set ssl=on, restart PostgreSQL, or enforce hostssl.
+#
+postgresql_tls_certificate_deployment_enabled: false
+
+# Reject certificates that expire sooner than this threshold.
+postgresql_tls_minimum_validity_days: 30
+
+# Optional per-node SAN verification.
+#
+# Example:
+# postgresql_tls_expected_identities:
+#   pg-node-01:
+#     dns:
+#       - "<PG-NODE-01-FQDN>"
+#     ip:
+#       - "<PG-NODE-01-IP>"
+#
+postgresql_tls_expected_identities: {}
+
+# ---------------------------------------------------------------------------
+# PostgreSQL TLS activation
+# ---------------------------------------------------------------------------
+#
+# SAFETY:
+#   Disabled by default.
+#
+# When enabled, playbooks/activate-postgresql-tls.yml:
+#   1. validates cert/key files on every DB node;
+#   2. updates Patroni dynamic PostgreSQL parameters for ssl=on;
+#   3. DOES NOT restart PostgreSQL/Patroni automatically;
+#   4. DOES NOT convert pg_hba rules to hostssl automatically.
+#
+# This intentional split allows a future operator to review pending-restart
+# state and perform a controlled rolling restart / switchover.
+#
+postgresql_tls_activation_enabled: false
+
+# Future operator can use this after TLS is already active and validated.
+# The current activation playbook does not enforce hostssl by itself.
+
+# ===========================================================================
+# Production finalization capabilities
+# ===========================================================================
+#
+# Environment-changing features remain disabled by default.
+
+# OS / SSH / AppArmor
+os_hardening_enabled: false
+os_hardening_manage_sshd: false
+os_hardening_sshd_permit_root_login: "no"
+os_hardening_sshd_password_authentication: false
+os_hardening_sshd_kbd_interactive_authentication: false
+os_hardening_sshd_x11_forwarding: false
+os_hardening_sshd_max_auth_tries: 4
+os_hardening_apparmor_enforce_enabled: false
+os_hardening_apparmor_profiles: []
+
+# PostgreSQL HA monitoring only.
+# Host metrics remain managed by the existing node_exporter platform.
+postgresql_ha_monitoring_enabled: true
+postgresql_exporter_enabled: true
+postgresql_exporter_port: 9187
+
+# Native backup / WAL archive.
+postgresql_backup_management_enabled: false
+postgresql_backup_archive_command: ""
+postgresql_backup_archive_timeout: "60s"
+postgresql_backup_destination: ""
+
+# Central logging integration.
+postgresql_central_logging_enabled: false
+postgresql_central_logging_destination: ""
+
+# Automated package upgrades stay disabled.
+postgresql_patch_automation_enabled: false
+
+# ---------------------------------------------------------------------------
+# PostgreSQL HA monitoring endpoints
+# ---------------------------------------------------------------------------
+# HAProxy uses its built-in PROMEX service on 8404.
+# postgres_exporter is installed from the approved Ubuntu/internal APT repo.
+# It connects to the local PostgreSQL Unix socket using peer auth and a
+# dedicated non-superuser DB role granted only pg_monitor.
+postgresql_exporter_package: "prometheus-postgres-exporter"
+postgresql_exporter_service: "prometheus-postgres-exporter"
+postgresql_exporter_binary: "/usr/bin/prometheus-postgres-exporter"
+postgresql_exporter_path: "/metrics"
+postgresql_exporter_os_user: "postgres_exporter"
+postgresql_exporter_db_role: "postgres_exporter"
+postgresql_exporter_database: "postgres"
+haproxy_prometheus_enabled: true
+haproxy_prometheus_port: 8404
+haproxy_prometheus_path: "/metrics"

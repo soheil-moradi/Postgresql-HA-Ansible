@@ -1,0 +1,183 @@
+---
+- name: Prepare operating system and PostgreSQL storage
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  roles:
+    - role: common
+    - role: storage
+
+- name: Install and bootstrap etcd quorum
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  roles:
+    - role: etcd
+
+- name: Install and configure PostgreSQL and Patroni
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  roles:
+    - role: patroni
+
+- name: Discover Patroni state without changing service state
+  hosts: "{{ groups['postgresql_cluster'][0] }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Initialize Patroni discovery facts
+      ansible.builtin.set_fact:
+        patroni_discovered_topology: []
+        patroni_existing_primary_hosts: []
+        patroni_initialized_hosts: []
+
+    - name: Read current Patroni topology from the DCS
+      ansible.builtin.command:
+        cmd: patronictl -c /etc/patroni/patroni.yml list --format json
+      register: patroni_discovery_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Parse current Patroni topology when available
+      ansible.builtin.set_fact:
+        patroni_discovered_topology: "{{ patroni_discovery_raw.stdout | from_json }}"
+      when:
+        - patroni_discovery_raw.rc == 0
+        - patroni_discovery_raw.stdout | trim | length > 0
+
+    - name: Record the currently elected Patroni leader
+      ansible.builtin.set_fact:
+        patroni_existing_primary_hosts: >-
+          {{ patroni_discovered_topology
+             | selectattr('Role', 'equalto', 'Leader')
+             | map(attribute='Member')
+             | list }}
+
+    - name: Record nodes that already contain an initialized PostgreSQL data directory
+      ansible.builtin.set_fact:
+        patroni_initialized_hosts: "{{ patroni_initialized_hosts + [item] }}"
+      loop: "{{ groups['postgresql_cluster'] }}"
+      when: hostvars[item].patroni_pg_version_file.stat.exists | default(false) | bool
+
+    - name: Refuse an invalid multiple-leader observation
+      ansible.builtin.assert:
+        that:
+          - patroni_existing_primary_hosts | length <= 1
+        fail_msg: >-
+          More than one Patroni leader was reported by the DCS. Stop and
+          investigate etcd or network partitioning before continuing.
+
+    - name: Print discovered Patroni state
+      ansible.builtin.debug:
+        msg:
+          - >-
+            {{ 'Existing leader: ' ~ patroni_existing_primary_hosts[0]
+               if patroni_existing_primary_hosts | length == 1
+               else 'No active leader is currently reported by Patroni.' }}
+          - "Initialized PostgreSQL nodes: {{ patroni_initialized_hosts | join(', ') if patroni_initialized_hosts | length > 0 else 'none' }}"
+
+- name: Bootstrap only a completely new PostgreSQL cluster
+  hosts: "{{ groups['postgresql_cluster'][0] }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    patroni_discovery_host: "{{ groups['postgresql_cluster'][0] }}"
+  tasks:
+    - name: Start Patroni on the first node for initial cluster bootstrap
+      ansible.builtin.systemd_service:
+        name: patroni
+        enabled: true
+        state: started
+      when:
+        - hostvars[patroni_discovery_host].patroni_existing_primary_hosts | length == 0
+        - hostvars[patroni_discovery_host].patroni_initialized_hosts | length == 0
+
+    - name: Wait until the new cluster has a PostgreSQL primary
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}/primary"
+        method: GET
+        status_code: 200
+      register: patroni_fresh_bootstrap_check
+      retries: 40
+      delay: 5
+      until: patroni_fresh_bootstrap_check.status == 200
+      when:
+        - hostvars[patroni_discovery_host].patroni_existing_primary_hosts | length == 0
+        - hostvars[patroni_discovery_host].patroni_initialized_hosts | length == 0
+
+- name: Ensure all Patroni members are running
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Start and enable Patroni on every PostgreSQL node
+      ansible.builtin.systemd_service:
+        name: patroni
+        enabled: true
+        state: started
+
+    - name: Wait until the local PostgreSQL instance is healthy
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}/health"
+        method: GET
+        status_code: 200
+      register: patroni_local_health
+      retries: 60
+      delay: 5
+      until: patroni_local_health.status == 200
+
+- name: Assert stable Patroni topology before exposing the VIP
+  hosts: "{{ groups['postgresql_cluster'][0] }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Wait for one leader and two streaming standby nodes
+      ansible.builtin.command:
+        cmd: patronictl -c /etc/patroni/patroni.yml list --format json
+      register: patroni_pre_lb_topology_raw
+      changed_when: false
+      retries: 60
+      delay: 5
+      until:
+        - patroni_pre_lb_topology_raw.rc == 0
+        - patroni_pre_lb_topology_raw.stdout | trim | length > 0
+        - (patroni_pre_lb_topology_raw.stdout | from_json | length) == (groups['postgresql_cluster'] | length)
+        - (patroni_pre_lb_topology_raw.stdout | from_json | selectattr('Role', 'equalto', 'Leader') | list | length) == 1
+        - (patroni_pre_lb_topology_raw.stdout | from_json | selectattr('State', 'equalto', 'running') | list | length) == 1
+        - (patroni_pre_lb_topology_raw.stdout | from_json | selectattr('State', 'equalto', 'streaming') | list | length) == ((groups['postgresql_cluster'] | length) - 1)
+
+    - name: Parse stable Patroni topology
+      ansible.builtin.set_fact:
+        patroni_pre_lb_topology: "{{ patroni_pre_lb_topology_raw.stdout | from_json }}"
+
+    - name: Assert the expected three-node topology
+      ansible.builtin.assert:
+        that:
+          - patroni_pre_lb_topology | length == groups['postgresql_cluster'] | length
+          - patroni_pre_lb_topology | selectattr('Role', 'equalto', 'Leader') | list | length == 1
+          - patroni_pre_lb_topology | selectattr('State', 'equalto', 'running') | list | length == 1
+          - patroni_pre_lb_topology | selectattr('State', 'equalto', 'streaming') | list | length == 2
+        fail_msg: >-
+          Patroni must have exactly one running leader and two streaming
+          standby members before HAProxy and Keepalived are installed.
+
+    - name: Print Patroni topology before load balancer deployment
+      ansible.builtin.debug:
+        var: patroni_pre_lb_topology
+
+- name: Install HAProxy and Keepalived on all three database nodes
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  roles:
+    - role: haproxy
+    - role: keepalived

@@ -1,0 +1,21 @@
+# Secrets
+inventory/**/vault.yml
+.vault_pass
+*.key
+*.pem
+
+# Python / Ansible local state
+.venv/
+__pycache__/
+*.pyc
+*.retry
+
+# Local patch/backups generated during maintenance
+.*-backup/
+.*-patch-backup/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.code-workspace

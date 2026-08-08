@@ -1,0 +1,18 @@
+---
+# Optional PostgreSQL application access management.
+#
+# Default:
+#   postgresql_access_management_enabled: false
+#
+# The first inventory node is only a Patroni control point. The role discovers
+# the current Leader and executes all writable SQL there.
+
+- name: Manage PostgreSQL application databases and roles
+  hosts: postgresql_cluster[0]
+  become: true
+  gather_facts: false
+
+  roles:
+    - postgresql_access
+
+- import_playbook: validate.yml

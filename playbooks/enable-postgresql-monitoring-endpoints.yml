@@ -1,0 +1,283 @@
+---
+# Enable BOTH requested monitoring endpoints:
+#
+#   postgres_exporter  http://<node>:9187/metrics
+#   HAProxy PROMEX     http://<node>:8404/metrics
+#
+# Patroni :8008/metrics and etcd :2379/metrics already exist.
+#
+# No node_exporter configuration is touched.
+
+- name: Preflight monitoring endpoint dependencies
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+
+  tasks:
+    - name: Read postgres_exporter APT candidate from configured internal repositories
+      ansible.builtin.shell: |
+        set -o pipefail
+        apt-cache policy "{{ postgresql_exporter_package }}" \
+          | awk '/Candidate:/ {print $2}'
+      args:
+        executable: /bin/bash
+      register: monitoring_postgres_exporter_candidate
+      changed_when: false
+
+    - name: Require postgres_exporter package in configured APT repositories
+      ansible.builtin.assert:
+        that:
+          - monitoring_postgres_exporter_candidate.stdout | trim | length > 0
+          - monitoring_postgres_exporter_candidate.stdout | trim != '(none)'
+        fail_msg: >-
+          prometheus-postgres-exporter has no APT candidate on this node.
+          Add the Ubuntu Noble package to the approved internal repository
+          before running this playbook again. No monitoring change was made.
+
+    - name: Verify HAProxy contains built-in Prometheus exporter
+      ansible.builtin.command:
+        argv:
+          - haproxy
+          - -vv
+      register: monitoring_haproxy_build
+      changed_when: false
+
+    - name: Require HAProxy PROMEX support
+      ansible.builtin.assert:
+        that:
+          - "'prometheus-exporter' in monitoring_haproxy_build.stdout"
+        fail_msg: "Installed HAProxy does not expose the prometheus-exporter service."
+
+- name: Create least-privilege PostgreSQL monitoring role on current Patroni Leader
+  hosts: postgresql_cluster[0]
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Read Patroni topology
+      ansible.builtin.command:
+        argv:
+          - patronictl
+          - -c
+          - /etc/patroni/patroni.yml
+          - list
+          - "{{ postgres_cluster_name }}"
+          - --format
+          - json
+      register: monitoring_patroni_topology
+      changed_when: false
+
+    - name: Resolve current Patroni Leader
+      ansible.builtin.set_fact:
+        monitoring_patroni_leaders: >-
+          {{
+            monitoring_patroni_topology.stdout
+            | from_json
+            | selectattr('Role', 'equalto', 'Leader')
+            | map(attribute='Member')
+            | list
+          }}
+
+    - name: Require exactly one Patroni Leader
+      ansible.builtin.assert:
+        that:
+          - monitoring_patroni_leaders | length == 1
+          - monitoring_patroni_leaders[0] in groups['postgresql_cluster']
+        fail_msg: "Cannot safely create monitoring role without exactly one Patroni Leader."
+
+    - name: Store current Patroni Leader
+      ansible.builtin.set_fact:
+        monitoring_patroni_leader: "{{ monitoring_patroni_leaders[0] }}"
+
+    - name: Create and harden postgres_exporter database role
+      become_user: postgres
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        psql -X -v ON_ERROR_STOP=1 -d postgres <<'SQL'
+        DO $ansible$
+        DECLARE
+          v_exists boolean;
+          v_login boolean;
+          v_super boolean;
+          v_createdb boolean;
+          v_createrole boolean;
+          v_replication boolean;
+          v_bypassrls boolean;
+          v_connlimit integer;
+          v_password_is_null boolean;
+          v_comment text;
+        BEGIN
+          SELECT EXISTS (
+            SELECT 1 FROM pg_roles
+            WHERE rolname = '{{ postgresql_exporter_db_role }}'
+          ) INTO v_exists;
+
+          IF NOT v_exists THEN
+            EXECUTE 'CREATE ROLE "{{ postgresql_exporter_db_role }}" LOGIN
+                     NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+                     CONNECTION LIMIT 5 PASSWORD NULL';
+            RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE role-created';
+          END IF;
+
+          SELECT r.rolcanlogin,
+                 r.rolsuper,
+                 r.rolcreatedb,
+                 r.rolcreaterole,
+                 r.rolreplication,
+                 r.rolbypassrls,
+                 r.rolconnlimit,
+                 a.rolpassword IS NULL,
+                 shobj_description(r.oid, 'pg_authid')
+            INTO v_login,
+                 v_super,
+                 v_createdb,
+                 v_createrole,
+                 v_replication,
+                 v_bypassrls,
+                 v_connlimit,
+                 v_password_is_null,
+                 v_comment
+            FROM pg_roles r
+            JOIN pg_authid a ON a.oid = r.oid
+           WHERE r.rolname = '{{ postgresql_exporter_db_role }}';
+
+          IF v_login IS DISTINCT FROM true
+             OR v_super IS DISTINCT FROM false
+             OR v_createdb IS DISTINCT FROM false
+             OR v_createrole IS DISTINCT FROM false
+             OR v_replication IS DISTINCT FROM false
+             OR v_bypassrls IS DISTINCT FROM false
+             OR v_connlimit IS DISTINCT FROM 5
+          THEN
+            EXECUTE 'ALTER ROLE "{{ postgresql_exporter_db_role }}"
+                     LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+                     NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 5';
+            RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE role-attributes';
+          END IF;
+
+          IF NOT v_password_is_null THEN
+            EXECUTE 'ALTER ROLE "{{ postgresql_exporter_db_role }}" PASSWORD NULL';
+            RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE password-removed';
+          END IF;
+
+          IF NOT pg_has_role(
+            '{{ postgresql_exporter_db_role }}',
+            'pg_monitor',
+            'MEMBER'
+          ) THEN
+            EXECUTE 'GRANT pg_monitor TO "{{ postgresql_exporter_db_role }}"';
+            RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE pg-monitor-granted';
+          END IF;
+
+          IF NOT has_database_privilege(
+            '{{ postgresql_exporter_db_role }}',
+            '{{ postgresql_exporter_database }}',
+            'CONNECT'
+          ) THEN
+            EXECUTE 'GRANT CONNECT ON DATABASE "{{ postgresql_exporter_database }}"
+                     TO "{{ postgresql_exporter_db_role }}"';
+            RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE database-connect-granted';
+          END IF;
+
+          IF v_comment IS DISTINCT FROM
+             'ansible-managed; local peer-auth PostgreSQL monitoring role'
+          THEN
+            EXECUTE 'COMMENT ON ROLE "{{ postgresql_exporter_db_role }}"
+                     IS ''ansible-managed; local peer-auth PostgreSQL monitoring role''';
+            RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE role-comment';
+          END IF;
+        END
+        $ansible$;
+        SQL
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ monitoring_patroni_leader }}"
+      register: monitoring_role_apply
+      changed_when: >-
+        'ANSIBLE_MANAGED_CHANGE' in
+        (monitoring_role_apply.stdout ~ monitoring_role_apply.stderr)
+
+    - name: Validate postgres_exporter role is non-superuser and has pg_monitor
+      become_user: postgres
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -qAt
+          - -d
+          - postgres
+          - -c
+          - >-
+            SELECT
+              r.rolcanlogin::text || '|' ||
+              r.rolsuper::text || '|' ||
+              r.rolcreatedb::text || '|' ||
+              r.rolcreaterole::text || '|' ||
+              pg_has_role('{{ postgresql_exporter_db_role }}', 'pg_monitor', 'MEMBER')::text || '|' ||
+              (a.rolpassword IS NULL)::text
+            FROM pg_roles r
+            JOIN pg_authid a ON a.oid = r.oid
+            WHERE r.rolname='{{ postgresql_exporter_db_role }}';
+      delegate_to: "{{ monitoring_patroni_leader }}"
+      register: monitoring_role_validation
+      changed_when: false
+      failed_when: monitoring_role_validation.stdout | trim != 'true|false|false|false|true|true'
+
+- name: Install and configure PostgreSQL exporter on every DB node
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+
+  roles:
+    - postgresql_monitoring_exporters
+
+- name: Render HAProxy configuration with built-in Prometheus endpoint
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+
+  roles:
+    - haproxy
+
+  tasks:
+    - name: Validate rendered HAProxy configuration
+      ansible.builtin.command:
+        argv:
+          - haproxy
+          - -c
+          - -f
+          - /etc/haproxy/haproxy.cfg
+      changed_when: false
+
+    - name: Flush HAProxy handler before metrics validation
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for HAProxy Prometheus listener
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ haproxy_prometheus_port }}"
+        timeout: 20
+
+    - name: Read HAProxy Prometheus metrics
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ haproxy_prometheus_port }}{{ haproxy_prometheus_path }}"
+        return_content: true
+        status_code: 200
+      register: monitoring_haproxy_metrics
+      changed_when: false
+
+    - name: Assert HAProxy metrics are present
+      ansible.builtin.assert:
+        that:
+          - "'haproxy_' in monitoring_haproxy_metrics.content"
+        fail_msg: "HAProxy /metrics responded but no haproxy_* metrics were found."
+
+    - name: Print HAProxy endpoint
+      ansible.builtin.debug:
+        msg:
+          node: "{{ inventory_hostname }}"
+          endpoint: "http://{{ ansible_host }}:{{ haproxy_prometheus_port }}{{ haproxy_prometheus_path }}"
+
+- import_playbook: validate.yml

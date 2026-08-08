@@ -1,0 +1,85 @@
+---
+- name: Optionally configure internal Ubuntu repository sources
+  ansible.builtin.template:
+    src: ubuntu.sources.j2
+    dest: /etc/apt/sources.list.d/ubuntu.sources
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  when: apt_manage_internal_sources | bool
+  register: apt_sources_changed
+
+- name: Refresh APT cache after repository change
+  ansible.builtin.apt:
+    update_cache: true
+  when: apt_sources_changed is changed
+
+- name: Install common operating system packages
+  ansible.builtin.apt:
+    name:
+      - apparmor
+      - apparmor-utils
+      - ca-certificates
+      - curl
+      - dnsutils
+      - e2fsprogs
+      - xfsprogs
+      - iputils-ping
+      - jq
+      - lvm2
+      - netcat-openbsd
+      - python3-apt
+      - python3-psycopg2
+      - rsync
+    state: present
+    update_cache: false
+    policy_rc_d: 101
+
+- name: Set system timezone
+  community.general.timezone:
+    name: "{{ server_timezone }}"
+  when: manage_timezone | bool
+
+- name: Configure systemd-timesyncd for internal NTP
+  ansible.builtin.template:
+    src: timesyncd.conf.j2
+    dest: /etc/systemd/timesyncd.conf.d/99-postgresql-cluster.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: manage_timesyncd | bool
+  notify: Restart systemd-timesyncd
+
+- name: Ensure systemd-timesyncd is enabled
+  ansible.builtin.systemd_service:
+    name: systemd-timesyncd
+    enabled: true
+    state: started
+  when: manage_timesyncd | bool
+
+- name: Ensure AppArmor is enabled
+  ansible.builtin.systemd_service:
+    name: apparmor
+    enabled: true
+    state: started
+  when: apparmor_manage | bool
+
+- name: Set a conservative swappiness value
+  ansible.posix.sysctl:
+    name: vm.swappiness
+    value: "{{ postgres_sysctl_swappiness }}"
+    state: present
+    sysctl_set: true
+    reload: true
+
+- name: Optionally add cluster records to /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED POSTGRESQL CLUSTER"
+    block: |
+      {% for host in groups['postgresql_cluster'] %}
+      {{ hostvars[host].ansible_host }} {{ hostvars[host].node_fqdn }} {{ host }}
+      {% endfor %}
+      {{ postgres_cluster_vip }} {{ postgres_cluster_dns_name }}
+  when: manage_cluster_etc_hosts | bool

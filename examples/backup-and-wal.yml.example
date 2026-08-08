@@ -1,0 +1,11 @@
+---
+postgresql_backup_management_enabled: false
+
+# Must return 0 only after the WAL is safely archived.
+postgresql_backup_archive_command: ""
+
+# One minute is a reasonable starting example; very small values waste storage.
+postgresql_backup_archive_timeout: "60s"
+
+# Repository/tool-specific destination reference.
+postgresql_backup_destination: ""

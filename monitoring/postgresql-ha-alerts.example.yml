@@ -1,0 +1,58 @@
+groups:
+  - name: postgresql-ha-endpoints
+    rules:
+      - alert: PatroniMetricsTargetDown
+        expr: up{job="patroni"} == 0
+        for: 2m
+        labels:
+          severity: critical
+
+      - alert: EtcdMetricsTargetDown
+        expr: up{job="etcd"} == 0
+        for: 2m
+        labels:
+          severity: critical
+
+      - alert: PostgresExporterTargetDown
+        expr: up{job="postgres"} == 0
+        for: 2m
+        labels:
+          severity: critical
+
+      - alert: PostgreSQLExporterReportsDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+
+      - alert: HAProxyMetricsTargetDown
+        expr: up{job="haproxy"} == 0
+        for: 2m
+        labels:
+          severity: critical
+
+  - name: patroni-cluster
+    rules:
+      - alert: PostgreSQLHANoLeader
+        expr: sum(patroni_primary) != 1
+        for: 1m
+        labels:
+          severity: critical
+
+      - alert: PostgreSQLInstanceDown
+        expr: patroni_postgres_running == 0
+        for: 1m
+        labels:
+          severity: critical
+
+      - alert: PostgreSQLReplicaNotStreaming
+        expr: (patroni_replica == 1 or patroni_sync_standby == 1) and patroni_postgres_streaming == 0
+        for: 2m
+        labels:
+          severity: critical
+
+      - alert: PatroniDCSStale
+        expr: time() - patroni_dcs_last_seen > 60
+        for: 1m
+        labels:
+          severity: critical

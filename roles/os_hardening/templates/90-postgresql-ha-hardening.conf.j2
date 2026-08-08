@@ -1,0 +1,6 @@
+# Managed by Ansible.
+PermitRootLogin {{ os_hardening_sshd_permit_root_login }}
+PasswordAuthentication {{ os_hardening_sshd_password_authentication | ternary('yes', 'no') }}
+KbdInteractiveAuthentication {{ os_hardening_sshd_kbd_interactive_authentication | ternary('yes', 'no') }}
+X11Forwarding {{ os_hardening_sshd_x11_forwarding | ternary('yes', 'no') }}
+MaxAuthTries {{ os_hardening_sshd_max_auth_tries }}

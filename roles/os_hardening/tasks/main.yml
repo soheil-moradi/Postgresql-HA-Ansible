@@ -1,0 +1,52 @@
+---
+- name: Explain why OS hardening is disabled
+  ansible.builtin.debug:
+    msg: >-
+      OS/SSH/AppArmor enforcement is disabled. Audit and review console/key
+      access before enabling it.
+  when: not os_hardening_enabled | bool
+
+- name: Apply optional OS hardening
+  when: os_hardening_enabled | bool
+  block:
+    - name: Render SSH hardening drop-in
+      ansible.builtin.template:
+        src: 90-postgresql-ha-hardening.conf.j2
+        dest: /etc/ssh/sshd_config.d/90-postgresql-ha-hardening.conf
+        owner: root
+        group: root
+        mode: "0644"
+      when: os_hardening_manage_sshd | bool
+      notify: Reload ssh
+
+    - name: Validate sshd before reload
+      ansible.builtin.command:
+        argv: [sshd, -t]
+      changed_when: false
+      when: os_hardening_manage_sshd | bool
+
+    - name: Install AppArmor utilities when enforcement is requested
+      ansible.builtin.package:
+        name: apparmor-utils
+        state: present
+      when:
+        - os_hardening_apparmor_enforce_enabled | bool
+        - os_hardening_apparmor_profiles | length > 0
+
+    - name: Enforce explicitly reviewed AppArmor profiles
+      ansible.builtin.command:
+        argv:
+          - aa-enforce
+          - "{{ item }}"
+      loop: "{{ os_hardening_apparmor_profiles }}"
+      changed_when: true
+      when:
+        - os_hardening_apparmor_enforce_enabled | bool
+        - os_hardening_apparmor_profiles | length > 0
+
+    - name: Flush SSH reload before connectivity check
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verify Ansible still reaches the node
+      ansible.builtin.wait_for_connection:
+        timeout: 20
