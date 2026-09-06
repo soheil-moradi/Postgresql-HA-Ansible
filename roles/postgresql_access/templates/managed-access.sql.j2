@@ -231,7 +231,11 @@ BEGIN
     ) OR has_schema_privilege('{{ access.role }}', '{{ access.schema }}', 'CREATE')
       OR EXISTS (
         SELECT 1 FROM pg_default_acl d
-        CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+        CROSS JOIN LATERAL (
+            SELECT exploded.*
+            FROM unnest(d.defaclacl) AS raw(aclitem)
+            CROSS JOIN LATERAL aclexplode(ARRAY[raw.aclitem]) AS exploded
+        ) a
         WHERE d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.owner }}')
           AND d.defaclnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{{ access.schema }}')
           AND a.grantee = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.role }}')
@@ -263,7 +267,11 @@ BEGIN
           ON d.defaclrole = owner_role.oid
          AND d.defaclnamespace = n.oid
          AND d.defaclobjtype = 'r'
-        LEFT JOIN LATERAL aclexplode(COALESCE(d.defaclacl, '{}'::aclitem[])) a
+        LEFT JOIN LATERAL (
+            SELECT exploded.*
+            FROM unnest(d.defaclacl) AS raw(aclitem)
+            CROSS JOIN LATERAL aclexplode(ARRAY[raw.aclitem]) AS exploded
+        ) a
           ON a.grantee = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.role }}')
          AND a.privilege_type IN ('SELECT')
         WHERE owner_role.rolname = '{{ access.owner }}'
@@ -277,7 +285,11 @@ BEGIN
           ON d.defaclrole = owner_role.oid
          AND d.defaclnamespace = n.oid
          AND d.defaclobjtype = 'S'
-        LEFT JOIN LATERAL aclexplode(COALESCE(d.defaclacl, '{}'::aclitem[])) a
+        LEFT JOIN LATERAL (
+            SELECT exploded.*
+            FROM unnest(d.defaclacl) AS raw(aclitem)
+            CROSS JOIN LATERAL aclexplode(ARRAY[raw.aclitem]) AS exploded
+        ) a
           ON a.grantee = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.role }}')
          AND a.privilege_type IN ('SELECT')
         WHERE owner_role.rolname = '{{ access.owner }}'
@@ -318,7 +330,11 @@ BEGIN
           ON d.defaclrole = owner_role.oid
          AND d.defaclnamespace = n.oid
          AND d.defaclobjtype = 'r'
-        LEFT JOIN LATERAL aclexplode(COALESCE(d.defaclacl, '{}'::aclitem[])) a
+        LEFT JOIN LATERAL (
+            SELECT exploded.*
+            FROM unnest(d.defaclacl) AS raw(aclitem)
+            CROSS JOIN LATERAL aclexplode(ARRAY[raw.aclitem]) AS exploded
+        ) a
           ON a.grantee = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.role }}')
          AND a.privilege_type IN ('SELECT','INSERT','UPDATE','DELETE')
         WHERE owner_role.rolname = '{{ access.owner }}'
@@ -332,7 +348,11 @@ BEGIN
           ON d.defaclrole = owner_role.oid
          AND d.defaclnamespace = n.oid
          AND d.defaclobjtype = 'S'
-        LEFT JOIN LATERAL aclexplode(COALESCE(d.defaclacl, '{}'::aclitem[])) a
+        LEFT JOIN LATERAL (
+            SELECT exploded.*
+            FROM unnest(d.defaclacl) AS raw(aclitem)
+            CROSS JOIN LATERAL aclexplode(ARRAY[raw.aclitem]) AS exploded
+        ) a
           ON a.grantee = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.role }}')
          AND a.privilege_type IN ('USAGE','SELECT','UPDATE')
         WHERE owner_role.rolname = '{{ access.owner }}'
@@ -400,7 +420,12 @@ BEGIN
                   has_table_privilege('{{ access.role }}', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
                  OR (c.relkind = 'S' AND has_sequence_privilege('{{ access.role }}', c.oid, 'USAGE,UPDATE')))
        ) OR EXISTS (
-          SELECT 1 FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+          SELECT 1 FROM pg_default_acl d
+          CROSS JOIN LATERAL (
+              SELECT exploded.*
+              FROM unnest(d.defaclacl) AS raw(aclitem)
+              CROSS JOIN LATERAL aclexplode(ARRAY[raw.aclitem]) AS exploded
+          ) a
           WHERE d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.owner }}')
             AND (d.defaclnamespace = 0 OR d.defaclnamespace =
                  (SELECT oid FROM pg_namespace WHERE nspname = '{{ access.schema }}'))
