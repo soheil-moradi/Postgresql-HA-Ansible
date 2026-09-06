@@ -29,6 +29,9 @@ frontend postgresql_primary
 backend patroni_primary_nodes
     mode tcp
     option httpchk GET /primary
+{% if patroni_rest_tls_enabled | bool %}
+    http-check connect ssl verify required ca-file {{ haproxy_patroni_tls_ca_file }}
+{% endif %}
     http-check expect status 200
 {% for host in groups['postgresql_cluster'] %}
     server {{ host }} {{ hostvars[host].ansible_host }}:{{ postgresql_port }} check port {{ patroni_rest_port }} inter 2s fall 3 rise 2 on-marked-down shutdown-sessions

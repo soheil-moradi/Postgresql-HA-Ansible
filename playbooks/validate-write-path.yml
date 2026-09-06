@@ -31,3 +31,5 @@
         replicas: "{{ write_probe_replicas | map('extract', hostvars, 'ansible_host') | list }}"
         username: "{{ patroni_superuser_username }}"
         password: "{{ vault_postgres_superuser_password }}"
+        sslmode: "{{ 'verify-ca' if (postgresql_tls_activation_enabled | bool) else 'prefer' }}"
+        sslrootcert: "{{ postgresql_tls_ca_file if (postgresql_tls_activation_enabled | bool) else omit }}"

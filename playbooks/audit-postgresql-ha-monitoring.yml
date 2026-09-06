@@ -10,17 +10,23 @@
   tasks:
     - name: Verify Patroni metrics
       ansible.builtin.uri:
-        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}/metrics"
+        url: "{{ patroni_rest_scheme }}://{{ ansible_host }}:{{ patroni_rest_port }}/metrics"
         return_content: true
         status_code: 200
+        validate_certs: "{{ patroni_rest_tls_enabled | bool }}"
+        ca_path: "{{ patroni_rest_tls_ca_file if (patroni_rest_tls_enabled | bool) else omit }}"
       register: audit_patroni_metrics
       changed_when: false
 
     - name: Verify etcd metrics
       ansible.builtin.uri:
-        url: "http://{{ ansible_host }}:{{ etcd_client_port }}/metrics"
+        url: "{{ etcd_client_scheme }}://{{ ansible_host }}:{{ etcd_client_port }}/metrics"
         return_content: true
         status_code: 200
+        validate_certs: "{{ etcd_tls_enabled | bool }}"
+        ca_path: "{{ etcd_tls_ca_file if (etcd_tls_enabled | bool) else omit }}"
+        client_cert: "{{ etcd_tls_client_cert_file if (etcd_tls_enabled | bool) else omit }}"
+        client_key: "{{ etcd_tls_client_key_file if (etcd_tls_enabled | bool) else omit }}"
       register: audit_etcd_metrics
       changed_when: false
 
@@ -46,8 +52,8 @@
       ansible.builtin.debug:
         msg:
           node: "{{ inventory_hostname }}"
-          patroni: "http://{{ ansible_host }}:{{ patroni_rest_port }}/metrics"
-          etcd: "http://{{ ansible_host }}:{{ etcd_client_port }}/metrics"
+          patroni: "{{ patroni_rest_scheme }}://{{ ansible_host }}:{{ patroni_rest_port }}/metrics"
+          etcd: "{{ etcd_client_scheme }}://{{ ansible_host }}:{{ etcd_client_port }}/metrics"
           postgres_exporter: >-
             {{
               ('http://' ~ ansible_host ~ ':' ~ postgresql_exporter_port|string ~ postgresql_exporter_path)

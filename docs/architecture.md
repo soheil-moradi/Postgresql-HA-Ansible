@@ -134,6 +134,11 @@ etcd client/peer traffic
 
 Enabling one does not automatically secure the others.
 
+When enabled, Patroni REST uses HTTPS with the configured CA and etcd uses
+mutual TLS for both client and peer traffic. Health checks and operator probes
+derive their scheme from the same inventory flags; no endpoint silently falls
+back to plaintext after the switch.
+
 ## 11. Design constraints
 
 - Exactly one writable Primary is expected.

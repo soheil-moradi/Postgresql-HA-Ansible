@@ -1,0 +1,5 @@
+---
+patroni_rest_tls_enabled: false
+patroni_rest_tls_ca_file: /etc/patroni/tls/ca.crt
+haproxy_patroni_tls_directory: /etc/haproxy/tls
+haproxy_patroni_tls_ca_file: /etc/haproxy/tls/patroni-ca.crt

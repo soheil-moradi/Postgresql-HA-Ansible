@@ -15,8 +15,8 @@ Per database node:
 
 | Component | Endpoint | Notes |
 |---|---|---|
-| Patroni | `http://<node>:8008/metrics` | Built into Patroni |
-| etcd | `http://<node>:2379/metrics` | Built into etcd |
+| Patroni | `http://<node>:8008/metrics` or HTTPS | Transport follows `patroni_rest_tls_enabled` |
+| etcd | `http://<node>:2379/metrics` or HTTPS/mTLS | Transport follows `etcd_tls_enabled`; monitoring needs a client certificate when enabled |
 | HAProxy | `http://<node>:8404/metrics` | Built-in PROMEX service |
 | PostgreSQL | `http://<node>:9187/metrics` | `prometheus-postgres-exporter` |
 | HAProxy local stats | `http://127.0.0.1:7000/stats` | Local-only UI |
@@ -146,6 +146,10 @@ Expected PostgreSQL exporter signal:
 ```text
 pg_up 1
 ```
+
+When control-plane TLS is enabled, use the monitoring client's CA and (for
+etcd) client certificate instead of the HTTP examples. Never disable certificate
+verification just to make a target green.
 
 ## Alert baseline
 

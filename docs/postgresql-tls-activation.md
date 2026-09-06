@@ -2,7 +2,9 @@
 
 ![Change Type](https://img.shields.io/badge/change-rolling_restart_required-orange)
 
-This capability prepares PostgreSQL TLS settings in Patroni DCS without automatically restarting all database members.
+This capability prepares PostgreSQL TLS settings in Patroni DCS without
+automatically restarting all database members. Patroni REST and etcd have
+separate switches and certificate publication in `postgresql_tls_files`.
 
 ## Enable gate
 
@@ -32,6 +34,11 @@ ssl_cert_file=<managed server certificate>
 ssl_key_file=<managed private key>
 ssl_min_protocol_version=TLSv1.2
 ```
+
+If `patroni_rest_tls_enabled` is true, the same playbook talks to Patroni over
+HTTPS and verifies `patroni_rest_tls_ca_file`. If `etcd_tls_enabled` is true,
+the local Patroni configuration and every `etcdctl` validation use the etcd CA
+and client certificate.
 
 It intentionally does **not**:
 

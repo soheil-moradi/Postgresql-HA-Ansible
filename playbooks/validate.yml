@@ -13,6 +13,9 @@
           endpoint health
       environment:
         ETCDCTL_API: "3"
+        ETCDCTL_CACERT: "{{ etcd_tls_ca_file if (etcd_tls_enabled | bool) else omit }}"
+        ETCDCTL_CERT: "{{ etcd_tls_client_cert_file if (etcd_tls_enabled | bool) else omit }}"
+        ETCDCTL_KEY: "{{ etcd_tls_client_key_file if (etcd_tls_enabled | bool) else omit }}"
       changed_when: false
       register: etcd_health
 
@@ -31,9 +34,11 @@
 
     - name: Check Patroni REST health
       ansible.builtin.uri:
-        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}/health"
+        url: "{{ patroni_rest_scheme }}://{{ ansible_host }}:{{ patroni_rest_port }}/health"
         method: GET
         status_code: 200
+        validate_certs: "{{ patroni_rest_tls_enabled | bool }}"
+        ca_path: "{{ patroni_rest_tls_ca_file if (patroni_rest_tls_enabled | bool) else omit }}"
       register: patroni_health
       retries: 10
       delay: 3
@@ -102,6 +107,9 @@
     - name: Wait until PostgreSQL is reachable through VIP and HAProxy
       ansible.builtin.command:
         cmd: "pg_isready -h {{ postgres_cluster_vip }} -p {{ haproxy_postgresql_port }} -t 5"
+      environment:
+        PGSSLMODE: "{{ 'verify-ca' if (postgresql_tls_activation_enabled | bool) else 'prefer' }}"
+        PGSSLROOTCERT: "{{ postgresql_tls_ca_file if (postgresql_tls_activation_enabled | bool) else omit }}"
       changed_when: false
       register: vip_pg_isready
       retries: 20
@@ -117,6 +125,8 @@
           -d postgres -Atqc "SELECT NOT pg_is_in_recovery();"
       environment:
         PGPASSWORD: "{{ vault_postgres_superuser_password }}"
+        PGSSLMODE: "{{ 'verify-ca' if (postgresql_tls_activation_enabled | bool) else 'prefer' }}"
+        PGSSLROOTCERT: "{{ postgresql_tls_ca_file if (postgresql_tls_activation_enabled | bool) else omit }}"
       register: vip_primary_query
       changed_when: false
       no_log: true
@@ -137,6 +147,8 @@
           "SELECT count(*) FROM pg_stat_replication WHERE sync_state IN ('sync', 'quorum');"
       environment:
         PGPASSWORD: "{{ vault_postgres_superuser_password }}"
+        PGSSLMODE: "{{ 'verify-ca' if (postgresql_tls_activation_enabled | bool) else 'prefer' }}"
+        PGSSLROOTCERT: "{{ postgresql_tls_ca_file if (postgresql_tls_activation_enabled | bool) else omit }}"
       register: synchronous_replication_query
       changed_when: false
       retries: 20

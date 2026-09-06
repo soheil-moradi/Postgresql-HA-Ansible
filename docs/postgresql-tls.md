@@ -5,7 +5,9 @@
 
 ## Scope
 
-This document covers the PostgreSQL data-plane TLS design. Patroni REST and etcd TLS are separate control-plane hardening changes.
+This document covers PostgreSQL data-plane TLS plus the optional Patroni REST and
+etcd control-plane TLS switches. Every switch is disabled by default and requires
+organization-issued certificates; this project never generates private keys.
 
 ## Current safe defaults
 
@@ -16,6 +18,8 @@ postgresql_tls_min_protocol_version: "TLSv1.2"
 postgresql_tls_certificate_deployment_enabled: false
 postgresql_tls_activation_enabled: false
 postgresql_tls_internal_sslmode: "prefer"
+patroni_rest_tls_enabled: false
+etcd_tls_enabled: false
 ```
 
 TLS is not enabled by merely defining file paths.
@@ -107,4 +111,45 @@ certificates
 -> switchover/failover test
 ```
 
-See [TLS Activation](postgresql-tls-activation.md).
+See [TLS Activation](postgresql-tls-activation.md) for PostgreSQL and the control
+plane rollout sequence.
+
+## Control-plane TLS
+
+Patroni REST and etcd must be migrated as a coordinated phase because deploy and
+validation probes depend on their URL schemes.
+
+1. Issue a CA-signed Patroni REST certificate for each node and configure its
+   source, key source, CA source and expected DNS/IP identities.
+2. Issue etcd server, peer and client certificates. The server and peer
+   certificates must contain every address used by the three-node cluster.
+3. Set `patroni_rest_tls_enabled: true` and/or `etcd_tls_enabled: true`, then run
+   `playbooks/deploy-postgresql-tls-certificates.yml` on all three nodes.
+4. Review the validation output. For an already-running HTTP quorum, use the
+   explicit `playbooks/migrate-etcd-tls.yml` maintenance playbook; do not set the
+   flag and run a normal rolling deploy. For a new cluster, rerun the normal
+   deploy/validation workflow; it
+   will use HTTPS/mTLS URLs automatically. Do not use `--limit` for this change.
+
+For Patroni REST, `optional` client verification is the default so HAProxy can
+perform an HTTPS health check without holding a client private key. The current
+automation deliberately accepts only `none` or `optional`; selecting
+`required` would make the built-in HAProxy check fail until a reviewed client-key
+delivery and health-check configuration is added.
+
+### هشدار مهاجرت etcd موجود
+
+تغییر مستقیم `etcd_tls_enabled` روی quorum فعال، اعضا را یکی‌یکی از HTTP به
+HTTPS می‌برد و می‌تواند quorum را از بین ببرد. role عمداً این حالت را بدون
+تأیید صریح متوقف می‌کند. برای یک کلاستر موجود، قبل از اجرای تغییر باید یک
+maintenance window، snapshot قابل‌بازگردانی و روش هماهنگ توقف/راه‌اندازی هر سه
+عضو و Patroni داشته باشید. پس از اثبات سلامت quorum، مقدار
+`etcd_tls_existing_cluster_migration_ack` را فقط برای همان اجرای کنترل‌شده true
+کنید و وجود marker زیر را بررسی کنید:
+
+```text
+/etc/etcd/tls/.migration-complete
+```
+
+در استقرار کاملاً جدید، چون etcd هنوز فعال نشده است، این guard مانع فعال‌سازی
+TLS نمی‌شود.

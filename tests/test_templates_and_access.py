@@ -77,6 +77,45 @@ class Templates(unittest.TestCase):
             for name in ['superuser','replication','rewind']:
                 self.assertEqual(obj['postgresql']['authentication'][name]['password'],secret)
 
+    def test_tls_templates_switch_all_control_and_data_plane_endpoints(self):
+        env = environment()
+        cfg = variables(env)
+        cfg.update(
+            patroni_rest_tls_enabled=True,
+            patroni_rest_scheme='https',
+            patroni_rest_tls_verify_client='optional',
+            patroni_rest_tls_cert_file='/etc/patroni/tls/server.crt',
+            patroni_rest_tls_key_file='/etc/patroni/tls/server.key',
+            patroni_rest_tls_ca_file='/etc/patroni/tls/ca.crt',
+            etcd_tls_enabled=True,
+            etcd_client_scheme='https',
+            etcd_tls_ca_file='/etc/etcd/tls/ca.crt',
+            etcd_tls_server_cert_file='/etc/etcd/tls/server.crt',
+            etcd_tls_server_key_file='/etc/etcd/tls/server.key',
+            etcd_tls_peer_cert_file='/etc/etcd/tls/peer.crt',
+            etcd_tls_peer_key_file='/etc/etcd/tls/peer.key',
+            etcd_tls_client_cert_file='/etc/etcd/tls/client.crt',
+            etcd_tls_client_key_file='/etc/etcd/tls/client.key',
+            postgresql_tls_activation_enabled=True,
+            haproxy_patroni_tls_ca_file='/etc/haproxy/tls/patroni-ca.crt',
+        )
+        patroni = yaml.safe_load(env.from_string(
+            (ROOT / 'roles/patroni/templates/patroni.yml.j2').read_text()
+        ).render(**cfg))
+        self.assertEqual(patroni['restapi']['certfile'], '/etc/patroni/tls/server.crt')
+        self.assertEqual(patroni['restapi']['verify_client'], 'optional')
+        self.assertTrue(all(str(x).endswith(f":{cfg['etcd_client_port']}") for x in patroni['etcd3']['hosts']))
+        self.assertEqual(patroni['etcd3']['protocol'], 'https')
+        self.assertEqual(patroni['postgresql']['parameters']['ssl'], 'on')
+
+        etcd = env.from_string((ROOT / 'roles/etcd/templates/etcd.j2').read_text()).render(**cfg)
+        self.assertIn('ETCD_LISTEN_CLIENT_URLS="https://', etcd)
+        self.assertIn('ETCD_CLIENT_CERT_AUTH="true"', etcd)
+        self.assertIn('ETCD_PEER_CLIENT_CERT_AUTH="true"', etcd)
+
+        haproxy = env.from_string((ROOT / 'roles/haproxy/templates/haproxy.cfg.j2').read_text()).render(**cfg)
+        self.assertIn('http-check connect ssl verify required', haproxy)
+
 
 @unittest.skipUnless(jinja2 and os.environ.get('POSTGRES_TEST_DSN') and shutil.which('psql'),
                      'Requires an isolated PostgreSQL 16 test DSN, psql, and Jinja2')

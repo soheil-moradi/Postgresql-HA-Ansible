@@ -51,7 +51,7 @@ choices. `synchronous_mode_strict: false` is not automatically changed to true.
 
 ## Validation supplied and its limits
 
-The authoring environment ran 24 local tests covering YAML duplicate keys and
+The authoring environment ran 28 local tests covering YAML duplicate keys and
 parsing, Python parsing, shell syntax, reload error propagation, DCS HTTP payloads
 and subset comparisons, firewall input validation and rollback, and backup mount
 guards. It did not have Ansible/Jinja2/PostgreSQL/nftables/HAProxy executables.
@@ -70,6 +70,7 @@ ansible-playbook site.yml playbooks/*.yml --syntax-check --ask-vault-pass
 ```
 
 Tests print an explicit skip if Jinja2 or the disposable PostgreSQL DSN is absent.
+The TLS template assertions run in CI where Jinja2 and Ansible are installed.
 Never point `POSTGRES_TEST_DSN` at a business database; it is for an isolated test
 instance. Runtime prerequisites are Ubuntu 24.04/Python 3.12 and PostgreSQL 16.
 
@@ -135,10 +136,13 @@ a generic replica-first sequence. Do not automate a cluster-wide restart.
    including reviewed extra rules, become `hostssl`; contradictory `hostnossl`
    exceptions and trust entries are rejected.
 
-Patroni REST and etcd still use HTTP in this patch; PostgreSQL TLS does not encrypt
-the control plane. Use the reviewed isolated management network/firewall described
-below. If policy requires control-plane mutual TLS, plan that as a separate PKI
-migration. This patch does not invent CA files or rotate etcd identities.
+The control plane is also staged: `patroni_rest_tls_enabled` switches Patroni REST
+to HTTPS and `etcd_tls_enabled` switches both etcd client and peer traffic to
+mTLS. Certificate files are validated before the services are configured; source
+paths and SAN expectations must be supplied by the operator. HAProxy validates the
+Patroni REST CA for its HTTPS health checks, and all `etcdctl`/operator probes use
+the matching CA and client identity. These flags remain disabled by default and do
+not generate or rotate CA material.
 
 ## Network enforcement
 

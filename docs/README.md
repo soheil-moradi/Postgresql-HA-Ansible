@@ -1,57 +1,47 @@
-# 📚 Documentation Index
+# فهرست مستندات فارسی
 
-> See [Project Completeness](project-completeness.md) for the implemented-capability checklist and environment-specific gates.
+راهنمای اصلی استقرار و عملیات در [راهنمای جامع فارسی](راهنمای-جامع-استقرار-و-عملیات.md)
+قرار دارد. نام متغیرها، playbookها و فایل‌های فنی عمداً انگلیسی است تا مستقیماً
+در repository قابل استفاده باشد.
 
-![Docs](https://img.shields.io/badge/docs-maintained-success)
-![Safety](https://img.shields.io/badge/approach-safety--first-blue)
+## شروع سریع
 
-Use this page as the entry point for operators, platform engineers and DBAs.
+- [راهنمای جامع استقرار و عملیات](راهنمای-جامع-استقرار-و-عملیات.md)
+- [راهنمای TLS](راهنمای-tls.md)
+- [ساخت کاربر و دیتابیس](راهنمای-ساخت-کاربر-و-دیتابیس.md)
+- [معماری](architecture.md)
+- [استقرار](deployment-guide.md)
+- [پیش‌نیازها و preflight](preflight.md)
+- [اعتبارسنجی](validation.md)
+- [مرجع تنظیمات](configuration-reference.md)
 
-## 🚀 Build and deploy
+## عملیات و بازیابی
 
-| Document | Purpose |
-|---|---|
-| [Architecture](architecture.md) | Components, data path, control plane, storage and port matrix |
-| [Ports & Endpoints](ports-and-endpoints.md) | Quick network and monitoring port reference |
-| [Deployment Guide](deployment-guide.md) | End-to-end installation workflow |
-| [Preflight Checks](preflight.md) | Non-destructive deployment safety gate |
-| [Validation & Idempotency](validation.md) | HA assertions, readiness checks and convergence target |
-| [Configuration Reference](configuration-reference.md) | Important variables and feature flags |
-| [Secrets Management](secrets-management.md) | Vault, credentials, certificates and rotation principles |
+- [راهنمای عملیات](operations-guide.md)
+- [Failover و Switchover](failover-and-switchover.md)
+- [پایش](monitoring.md)
+- [ثبت رخداد](logging.md)
+- [پشتیبان و بازیابی](backup-and-restore.md)
+- [بازسازی نود](node-rebuild.md)
+- [افزایش دیسک](disk-expansion.md)
+- [عیب‌یابی](troubleshooting.md)
 
-## 🛠️ Operate
+## امنیت
 
-| Document | Purpose |
-|---|---|
-| [Operations Guide](operations-guide.md) | Daily health checks, status, maintenance and safe restart rules |
-| [Failover & Switchover](failover-and-switchover.md) | Planned and automatic role changes, validation and test evidence |
-| [Monitoring](monitoring.md) | Prometheus endpoints, exporter security and alerting |
-| [Logging](logging.md) | PostgreSQL log baseline and central-shipping integration |
-| [Patch Management](patch-management.md) | HA-safe rolling patch workflow |
-| [Disk Expansion](disk-expansion.md) | Online LVM/XFS growth procedure |
-| [Node Rebuild](node-rebuild.md) | Safe replacement/rejoin procedure for one failed replica node |
-| [Troubleshooting](troubleshooting.md) | Symptom-driven diagnostic commands |
+- [سخت‌سازی امنیتی](security-hardening.md)
+- [سخت‌سازی شبکه](network-hardening.md)
+- [مدیریت دسترسی PostgreSQL](postgresql-access-management.md)
+- [فعال‌سازی TLS PostgreSQL](postgresql-tls-activation.md)
+- [پورت‌ها و endpointها](ports-and-endpoints.md)
+- [مدیریت secretها](secrets-management.md)
 
-## 🔒 Secure
+## پروژه و تغییرات
 
-| Document | Purpose |
-|---|---|
-| [Security Hardening](security-hardening.md) | Overall security model and hardening status |
-| [Network Hardening](network-hardening.md) | CIDR model and safe firewall-enforcement workflow |
-| [PostgreSQL Access Management](postgresql-access-management.md) | Databases, roles, memberships and privilege profiles |
-| [PostgreSQL TLS](postgresql-tls.md) | TLS design, audit and certificate requirements |
-| [PostgreSQL TLS Activation](postgresql-tls-activation.md) | Controlled TLS activation and rolling restart sequence |
+- [تصمیم‌های معماری](DECISIONS.md)
+- [مراحل بعدی](NEXT_PHASES.md)
+- [آمادگی production](production-readiness.md)
+- [کامل بودن پروژه](project-completeness.md)
+- [مدیریت patch](patch-management.md)
 
-## 💾 Protect and recover
-
-| Document | Purpose |
-|---|---|
-| [Backup & Restore](backup-and-restore.md) | Base backup, WAL archive, PITR and restore validation |
-| [Production Readiness](production-readiness.md) | Safe final audit and remaining environment-specific gates |
-
-## 🧭 Project history and decisions
-
-- [Architecture Decisions](DECISIONS.md)
-- [Remaining Environment Integrations](NEXT_PHASES.md)
-
-> ✅ Feature-specific documentation is intentionally linked from the top-level README and from this index so a new engineer does not need prior project history to operate the cluster safely.
+برای checklist نهایی، ابتدا preflight، سپس validation و در پایان auditهای backup،
+شبکه، TLS و monitoring را اجرا کنید.

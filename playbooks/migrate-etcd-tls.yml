@@ -1,0 +1,236 @@
+---
+# Existing etcd quorum migration is intentionally a coordinated maintenance
+# operation. Do not replace this with a normal rolling role run: mixed HTTP and
+# HTTPS peer transports can lose quorum.
+
+- name: Preflight an existing etcd HTTP to HTTPS migration
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  tasks:
+    - name: Require every database node for the coordinated migration
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | sort == groups['postgresql_cluster'] | sort
+        fail_msg: Do not use --limit; the etcd quorum migration must include all three nodes.
+      run_once: true
+
+    - name: Require explicit migration acknowledgement and TLS inputs
+      ansible.builtin.assert:
+        that:
+          - etcd_tls_enabled | bool
+          - etcd_tls_existing_cluster_migration_ack | bool
+          - etcd_tls_migration_marker is string
+        fail_msg: >-
+          Set etcd_tls_enabled=true and explicitly acknowledge this maintenance
+          window with etcd_tls_existing_cluster_migration_ack=true.
+
+    - name: Confirm the current quorum still answers over HTTP
+      ansible.builtin.command:
+        cmd: >-
+          etcdctl
+          --endpoints={% for host in groups['postgresql_cluster'] %}http://{{ hostvars[host].ansible_host }}:{{ etcd_client_port }}{% if not loop.last %},{% endif %}{% endfor %}
+          endpoint health
+      environment:
+        ETCDCTL_API: '3'
+      changed_when: false
+      register: etcd_http_health
+      retries: 5
+      delay: 2
+      until: etcd_http_health.rc == 0
+
+- name: Publish and validate all TLS files before stopping the control plane
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: postgresql_tls_files
+
+- name: Snapshot etcd before the coordinated outage
+  hosts: postgresql_cluster[0]
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  vars:
+    etcd_snapshot_path: "/var/backups/etcd/etcd-pre-tls-{{ ansible_date_time.iso8601_basic_short }}.db"
+  tasks:
+    - name: Create a root-owned etcd snapshot directory
+      ansible.builtin.file:
+        path: /var/backups/etcd
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Save an etcd snapshot through the current HTTP endpoint
+      ansible.builtin.command:
+        cmd: >-
+          etcdctl
+          --endpoints=http://127.0.0.1:{{ etcd_client_port }}
+          snapshot save {{ etcd_snapshot_path }}
+      environment:
+        ETCDCTL_API: '3'
+      register: etcd_snapshot
+      changed_when: true
+
+    - name: Confirm the snapshot file is non-empty
+      ansible.builtin.stat:
+        path: '{{ etcd_snapshot_path }}'
+      register: etcd_snapshot_stat
+
+    - name: Refuse to continue without a usable snapshot
+      ansible.builtin.assert:
+        that:
+          - etcd_snapshot_stat.stat.exists
+          - etcd_snapshot_stat.stat.size | int > 0
+        fail_msg: The etcd pre-TLS snapshot was not created; no service was stopped by this playbook.
+
+- name: Pause Patroni before taking the DCS offline
+  hosts: postgresql_cluster[0]
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Enter Patroni maintenance mode
+      ansible.builtin.command:
+        cmd: patronictl -c /etc/patroni/patroni.yml pause --wait
+      changed_when: true
+
+- name: Stop Patroni and etcd on every node
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Stop Patroni before the DCS transport changes
+      ansible.builtin.systemd_service:
+        name: patroni
+        state: stopped
+
+    - name: Stop etcd on every member before rendering HTTPS URLs
+      ansible.builtin.systemd_service:
+        name: etcd
+        state: stopped
+
+- name: Render the new etcd and Patroni TLS configurations while stopped
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Render etcd HTTPS and peer-mTLS configuration
+      ansible.builtin.template:
+        src: ../roles/etcd/templates/etcd.j2
+        dest: /etc/default/etcd
+        owner: root
+        group: root
+        mode: '0640'
+        validate: /bin/bash -n %s
+
+    - name: Render Patroni HTTPS/mTLS DCS configuration
+      ansible.builtin.template:
+        src: ../roles/patroni/templates/patroni.yml.j2
+        dest: /etc/patroni/patroni.yml
+        owner: postgres
+        group: postgres
+        mode: '0600'
+        validate: "python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' %s"
+      no_log: true
+
+    - name: Reload systemd units before starting the new transport
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+- name: Start the complete etcd quorum together
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Start etcd after all members have the same TLS configuration
+      ansible.builtin.systemd_service:
+        name: etcd
+        enabled: true
+        state: started
+
+    - name: Wait for the local etcd client port
+      ansible.builtin.wait_for:
+        host: '{{ ansible_host }}'
+        port: '{{ etcd_client_port }}'
+        timeout: 60
+
+- name: Verify the new etcd mTLS quorum
+  hosts: postgresql_cluster[0]
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Wait for all HTTPS etcd endpoints to report healthy
+      ansible.builtin.command:
+        cmd: >-
+          etcdctl
+          --endpoints={{ etcd_client_endpoints_csv }}
+          endpoint health
+      environment:
+        ETCDCTL_API: '3'
+        ETCDCTL_CACERT: '{{ etcd_tls_ca_file }}'
+        ETCDCTL_CERT: '{{ etcd_tls_client_cert_file }}'
+        ETCDCTL_KEY: '{{ etcd_tls_client_key_file }}'
+      register: etcd_https_health
+      changed_when: false
+      retries: 30
+      delay: 3
+      until: etcd_https_health.rc == 0
+
+- name: Record the completed etcd TLS migration on every node
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Write the migration marker only after quorum validation
+      ansible.builtin.file:
+        path: '{{ etcd_tls_migration_marker }}'
+        state: touch
+        modification_time: preserve
+        owner: etcd
+        group: etcd
+        mode: '0600'
+
+- name: Start Patroni and validate its new DCS/REST transport
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Start Patroni after etcd mTLS is healthy
+      ansible.builtin.systemd_service:
+        name: patroni
+        enabled: true
+        state: started
+
+    - name: Wait for the local Patroni health endpoint
+      ansible.builtin.uri:
+        url: '{{ patroni_rest_scheme }}://{{ ansible_host }}:{{ patroni_rest_port }}/health'
+        status_code: 200
+        validate_certs: '{{ patroni_rest_tls_enabled | bool }}'
+        ca_path: '{{ patroni_rest_tls_ca_file if (patroni_rest_tls_enabled | bool) else omit }}'
+      register: patroni_migration_health
+      retries: 40
+      delay: 3
+      until: patroni_migration_health.status == 200
+
+- name: Leave Patroni maintenance mode after all transports are healthy
+  hosts: postgresql_cluster[0]
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Resume Patroni failover management
+      ansible.builtin.command:
+        cmd: patronictl -c /etc/patroni/patroni.yml resume --wait
+      changed_when: true
+
+- import_playbook: validate.yml

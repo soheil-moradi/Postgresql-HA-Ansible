@@ -7,6 +7,29 @@
     state: present
     policy_rc_d: 101
 
+- name: Check etcd TLS files before rendering an HTTPS listener
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop:
+    - '{{ etcd_tls_ca_file }}'
+    - '{{ etcd_tls_server_cert_file }}'
+    - '{{ etcd_tls_server_key_file }}'
+    - '{{ etcd_tls_peer_cert_file }}'
+    - '{{ etcd_tls_peer_key_file }}'
+    - '{{ etcd_tls_client_cert_file }}'
+    - '{{ etcd_tls_client_key_file }}'
+  register: etcd_tls_file_stats
+  when: etcd_tls_enabled | bool
+
+- name: Refuse to render etcd TLS without every certificate file
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+    fail_msg: 'Missing etcd TLS file: {{ item.item }}'
+  loop: '{{ etcd_tls_file_stats.results }}'
+  when: etcd_tls_enabled | bool
+
 - name: Create etcd data directory
   ansible.builtin.file:
     path: "{{ etcd_data_dir }}"
@@ -20,6 +43,26 @@
   changed_when: false
   failed_when: false
   register: etcd_was_active
+
+- name: Check whether an etcd TLS migration has already been completed
+  ansible.builtin.stat:
+    path: '{{ etcd_tls_migration_marker }}'
+  register: etcd_tls_migration_marker_state
+
+- name: Refuse an unsafe one-member-at-a-time etcd transport migration
+  ansible.builtin.assert:
+    that:
+      - not (etcd_was_active.rc == 0 and (etcd_tls_enabled | bool)
+        and not (etcd_tls_migration_marker_state.stat.exists | default(false) | bool))
+        or etcd_tls_existing_cluster_migration_ack | bool
+      - not (etcd_was_active.rc == 0 and not (etcd_tls_enabled | bool)
+        and (etcd_tls_migration_marker_state.stat.exists | default(false) | bool))
+        or etcd_tls_existing_cluster_migration_ack | bool
+    fail_msg: >-
+      etcd is already active with the opposite transport. Refusing to switch a
+      live quorum member one at a time. Use the explicit maintenance-window
+      migration procedure, set etcd_tls_existing_cluster_migration_ack=true only
+      after the procedure, and verify the whole quorum before continuing.
 
 - name: Configure etcd cluster member
   ansible.builtin.template:
@@ -42,7 +85,7 @@
     set -e
     systemctl restart etcd
     for attempt in $(seq 1 30); do
-      if ETCDCTL_API=3 etcdctl         --endpoints=http://127.0.0.1:{{ etcd_client_port }}         endpoint health >/dev/null 2>&1; then
+      if ETCDCTL_API=3 etcdctl         --endpoints={{ ('https://' ~ ansible_host) if (etcd_tls_enabled | bool) else ('http://127.0.0.1') }}:{{ etcd_client_port }}         endpoint health >/dev/null 2>&1; then
         exit 0
       fi
       sleep 2
@@ -51,6 +94,11 @@
     exit 1
   args:
     executable: /bin/bash
+  environment:
+    ETCDCTL_API: "3"
+    ETCDCTL_CACERT: "{{ etcd_tls_ca_file if (etcd_tls_enabled | bool) else omit }}"
+    ETCDCTL_CERT: "{{ etcd_tls_client_cert_file if (etcd_tls_enabled | bool) else omit }}"
+    ETCDCTL_KEY: "{{ etcd_tls_client_key_file if (etcd_tls_enabled | bool) else omit }}"
   when:
     - etcd_config_result.changed
     - etcd_was_active.rc == 0
@@ -71,9 +119,31 @@
       endpoint health
   environment:
     ETCDCTL_API: "3"
+    ETCDCTL_CACERT: "{{ etcd_tls_ca_file if (etcd_tls_enabled | bool) else omit }}"
+    ETCDCTL_CERT: "{{ etcd_tls_client_cert_file if (etcd_tls_enabled | bool) else omit }}"
+    ETCDCTL_KEY: "{{ etcd_tls_client_key_file if (etcd_tls_enabled | bool) else omit }}"
   changed_when: false
   register: etcd_quorum_health
   retries: 20
   delay: 3
   until: etcd_quorum_health.rc == 0
-  run_once: true
+
+- name: Record a completed etcd TLS configuration after quorum validation
+  ansible.builtin.file:
+    path: '{{ etcd_tls_migration_marker }}'
+    state: touch
+    modification_time: preserve
+    owner: etcd
+    group: etcd
+    mode: '0600'
+  when:
+    - etcd_tls_enabled | bool
+    - etcd_quorum_health is succeeded
+
+- name: Remove the etcd TLS marker after validated plaintext configuration
+  ansible.builtin.file:
+    path: '{{ etcd_tls_migration_marker }}'
+    state: absent
+  when:
+    - not (etcd_tls_enabled | bool)
+    - etcd_quorum_health is succeeded

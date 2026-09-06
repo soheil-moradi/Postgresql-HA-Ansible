@@ -12,6 +12,7 @@ def main():
         node_port=dict(type='int', default=5432), replicas=dict(type='list', elements='str', required=True),
         username=dict(type='str', required=True), password=dict(type='str', required=True, no_log=True),
         timeout=dict(type='int', default=30), sslmode=dict(type='str', default='prefer'),
+        sslrootcert=dict(type='path', default=None),
     ), supports_check_mode=True)
     if module.check_mode:
         module.exit_json(changed=False, skipped=True, msg='Write probe is not executed in check mode')
@@ -26,9 +27,12 @@ def main():
     marker = 'ansible-ha-probe:' + token
     @contextmanager
     def connect(host, port):
-        conn = psycopg2.connect(host=host, port=port, user=p['username'], password=p['password'],
-                                dbname='postgres', connect_timeout=5, sslmode=p['sslmode'],
-                                options='-c statement_timeout=15000 -c lock_timeout=5000')
+        connect_args = dict(host=host, port=port, user=p['username'], password=p['password'],
+                            dbname='postgres', connect_timeout=5, sslmode=p['sslmode'],
+                            options='-c statement_timeout=15000 -c lock_timeout=5000')
+        if p['sslrootcert']:
+            connect_args['sslrootcert'] = p['sslrootcert']
+        conn = psycopg2.connect(**connect_args)
         try:
             with conn:
                 yield conn

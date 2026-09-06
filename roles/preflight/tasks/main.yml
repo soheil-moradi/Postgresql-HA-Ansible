@@ -17,7 +17,45 @@
       - postgres_cluster_dns_name | length > 0
       - postgresql_hba_additional_rules is sequence
       - postgresql_hba_additional_rules is not string
-    fail_msg: "Complete hosts.yml and group_vars/all/main.yml before deployment."
+  fail_msg: "Complete hosts.yml and group_vars/all/main.yml before deployment."
+
+- name: Reject incomplete TLS activation plans before changing any node
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (etcd_tls_enabled | default(false) | bool)
+        or (
+          (etcd_tls_ca_source | default('') | length > 0)
+          and (etcd_tls_server_cert_source | default('') | length > 0)
+          and (etcd_tls_server_key_source | default('') | length > 0)
+          and (etcd_tls_peer_cert_source | default('') | length > 0)
+          and (etcd_tls_peer_key_source | default('') | length > 0)
+          and (etcd_tls_client_cert_source | default('') | length > 0)
+          and (etcd_tls_client_key_source | default('') | length > 0)
+        )
+      - >-
+        not (patroni_rest_tls_enabled | default(false) | bool)
+        or (
+          (patroni_rest_tls_ca_source | default('') | length > 0)
+          and (patroni_rest_tls_cert_source | default('') | length > 0)
+          and (patroni_rest_tls_key_source | default('') | length > 0)
+          and (patroni_rest_tls_verify_client | default('optional')) in ['none', 'optional']
+        )
+      - >-
+        not (postgresql_tls_activation_enabled | default(false) | bool)
+        or (postgresql_tls_certificate_deployment_enabled | default(false) | bool)
+      - >-
+        postgresql_tls_internal_sslmode | default('prefer') in ['disable', 'prefer']
+        or (postgresql_tls_activation_enabled | default(false) | bool)
+      - >-
+        not (postgresql_tls_require_ssl | default(false) | bool)
+        or (postgresql_tls_activation_enabled | default(false) | bool)
+    fail_msg: >-
+      TLS activation requires complete certificate sources and a staged rollout:
+      publish/validate files first, then activate PostgreSQL TLS, then enforce
+      hostssl. Patroni REST client mode must be none/optional because the
+      built-in HAProxy health check has no client private key. No partial TLS
+      plan is allowed by the production preflight.
 
 - name: Assert secret variables were loaded from Ansible Vault
   ansible.builtin.assert:

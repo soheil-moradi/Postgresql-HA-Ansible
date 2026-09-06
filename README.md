@@ -1,5 +1,9 @@
 # PostgreSQL HA Ansible
 
+> راهنمای فارسی استقرار و عملیات: [راهنمای جامع فارسی](docs/راهنمای-جامع-استقرار-و-عملیات.md)؛
+> برای ساخت کاربر/دیتابیس و TLS نیز [راهنمای دسترسی](docs/راهنمای-ساخت-کاربر-و-دیتابیس.md)
+> و [راهنمای TLS](docs/راهنمای-tls.md) را ببینید.
+
 > **Production reliability patch:** read [the patch rollout guide](docs/production-fixes.md)
 > before running the changed automation. It documents the fixes, optional firewall
 > and pgBackRest workflows, real validation commands and tests not run in the
@@ -27,7 +31,7 @@
 | Authentication | ✅ Hardened | SCRAM, Patroni-managed `pg_hba`, no `trust` rules |
 | Access management | ✅ Capability | Declarative databases, roles, memberships and privilege profiles |
 | Monitoring | ✅ Ready | Patroni `:8008`, etcd `:2379`, HAProxy `:8404`, postgres_exporter `:9187` |
-| TLS | 🧩 Staged capability | Audit, certificate deployment and activation workflow |
+| TLS | 🧩 Staged capability | PostgreSQL TLS plus optional Patroni REST HTTPS and etcd mTLS |
 | Network hardening | 🧩 Staged capability | Audit and reviewed CIDR model; enforcement disabled by default |
 | OS hardening | 🧩 Staged capability | SSH/AppArmor framework; enforcement disabled by default |
 | Backup/PITR | 🧩 Staged capability | WAL archive readiness and restore/PITR runbook |
@@ -237,6 +241,8 @@ postgresql_network_hardening_enforce: false
 postgresql_access_management_enabled: false
 postgresql_tls_certificate_deployment_enabled: false
 postgresql_tls_activation_enabled: false
+patroni_rest_tls_enabled: false
+etcd_tls_enabled: false
 os_hardening_enabled: false
 postgresql_backup_management_enabled: false
 postgresql_central_logging_enabled: false

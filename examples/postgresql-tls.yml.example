@@ -63,3 +63,29 @@ postgresql_tls_minimum_validity_days: 30
 #       - "<PG-NODE-01-IP>"
 #
 postgresql_tls_expected_identities: {}
+
+# ---------------------------------------------------------------------------
+# Optional control-plane TLS (etcd mTLS + Patroni REST HTTPS)
+# ---------------------------------------------------------------------------
+# These flags are independent from PostgreSQL data-plane TLS. Enable them only
+# after the organization CA has issued node certificates with the required SANs.
+# The first deployment publishes and validates these files before etcd/Patroni
+# are configured; it does not invent or generate certificates.
+
+patroni_rest_tls_enabled: false
+patroni_rest_tls_verify_client: "optional"
+patroni_rest_tls_cert_source: ""
+patroni_rest_tls_key_source: ""
+patroni_rest_tls_ca_source: ""
+patroni_rest_tls_expected_identities: {}
+
+etcd_tls_enabled: false
+etcd_tls_existing_cluster_migration_ack: false
+etcd_tls_ca_source: ""
+etcd_tls_server_cert_source: ""
+etcd_tls_server_key_source: ""
+etcd_tls_peer_cert_source: ""
+etcd_tls_peer_key_source: ""
+etcd_tls_client_cert_source: ""
+etcd_tls_client_key_source: ""
+etcd_tls_expected_identities: {}

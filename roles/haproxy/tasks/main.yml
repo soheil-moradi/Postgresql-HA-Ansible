@@ -13,6 +13,26 @@
     sysctl_set: true
     reload: true
 
+- name: Create the HAProxy trust directory for Patroni REST TLS
+  ansible.builtin.file:
+    path: '{{ haproxy_patroni_tls_directory }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: patroni_rest_tls_enabled | bool
+
+- name: Install the Patroni REST CA for HAProxy health checks
+  ansible.builtin.copy:
+    src: '{{ patroni_rest_tls_ca_file }}'
+    dest: '{{ haproxy_patroni_tls_ca_file }}'
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload HAProxy
+  when: patroni_rest_tls_enabled | bool
+
 - name: Configure HAProxy PostgreSQL primary endpoint
   ansible.builtin.template:
     src: haproxy.cfg.j2

@@ -107,6 +107,23 @@ patroni_replication_username: replicator
 patroni_rewind_username: rewind_user
 patroni_rest_username: patroni_api
 
+# Patroni REST TLS protects health checks, DCS mutations and operator APIs.
+# "optional" permits HAProxy health checks without a client certificate while
+# still validating a client certificate when one is presented.
+patroni_rest_tls_enabled: false
+patroni_rest_tls_verify_client: "optional"
+patroni_rest_tls_directory: /etc/patroni/tls
+patroni_rest_tls_cert_file: /etc/patroni/tls/server.crt
+patroni_rest_tls_key_file: /etc/patroni/tls/server.key
+patroni_rest_tls_ca_file: /etc/patroni/tls/ca.crt
+patroni_rest_tls_ca_source: ""
+patroni_rest_tls_cert_source: ""
+patroni_rest_tls_key_source: ""
+patroni_rest_tls_expected_identities: {}
+
+# Derived URL schemes used by health checks and operator playbooks.
+patroni_rest_scheme: "{{ 'https' if (patroni_rest_tls_enabled | bool) else 'http' }}"
+
 # Conservative baseline for 8 vCPU / 32 GiB RAM. Tune from measurements later.
 postgresql_max_connections: 300
 postgresql_shared_buffers: 8GB
@@ -120,18 +137,43 @@ postgresql_log_min_duration_statement_ms: 1000
 
 # -----------------------------------------------------------------------------
 # etcd
-# This initial implementation uses the node network without TLS. Restrict ports
-# 2379/2380 to cluster nodes. TLS/auth hardening can be added as a later phase.
 # -----------------------------------------------------------------------------
 etcd_client_port: 2379
 etcd_peer_port: 2380
 etcd_cluster_token: pg-etcd-cluster-01
 etcd_data_dir: /var/lib/etcd
 
+# etcd TLS is explicit and disabled until all certificate sources and SANs have
+# been reviewed. When enabled, both client and peer traffic use mTLS.
+etcd_tls_enabled: false
+# Existing HTTP etcd members must not be switched one-by-one into HTTPS. Keep
+# this acknowledgement false; use the explicit migration runbook in a window
+# where a coordinated DCS outage is acceptable, then create the marker below.
+etcd_tls_existing_cluster_migration_ack: false
+etcd_tls_migration_marker: /etc/etcd/tls/.migration-complete
+etcd_tls_directory: /etc/etcd/tls
+etcd_tls_ca_file: /etc/etcd/tls/ca.crt
+etcd_tls_server_cert_file: /etc/etcd/tls/server.crt
+etcd_tls_server_key_file: /etc/etcd/tls/server.key
+etcd_tls_peer_cert_file: /etc/etcd/tls/peer.crt
+etcd_tls_peer_key_file: /etc/etcd/tls/peer.key
+etcd_tls_client_cert_file: /etc/etcd/tls/client.crt
+etcd_tls_client_key_file: /etc/etcd/tls/client.key
+etcd_tls_ca_source: ""
+etcd_tls_server_cert_source: ""
+etcd_tls_server_key_source: ""
+etcd_tls_peer_cert_source: ""
+etcd_tls_peer_key_source: ""
+etcd_tls_client_cert_source: ""
+etcd_tls_client_key_source: ""
+etcd_tls_expected_identities: {}
+
+etcd_client_scheme: "{{ 'https' if (etcd_tls_enabled | bool) else 'http' }}"
+
 # Derived endpoint CSV. It is rendered directly from inventory host IPs.
 etcd_client_endpoints_csv: >-
   {%- for host in groups['postgresql_cluster'] -%}
-  http://{{ hostvars[host].ansible_host }}:{{ etcd_client_port }}{% if not loop.last %},{% endif %}
+  {{ 'https' if (etcd_tls_enabled | bool) else 'http' }}://{{ hostvars[host].ansible_host }}:{{ etcd_client_port }}{% if not loop.last %},{% endif %}
   {%- endfor -%}
 
 # -----------------------------------------------------------------------------
@@ -301,8 +343,8 @@ postgresql_managed_access_profiles: []
 # PostgreSQL TLS foundation
 # ---------------------------------------------------------------------------
 #
-# This section only defines inputs for a future TLS rollout.
-# TLS is NOT enabled merely by setting certificate paths.
+# This section defines staged TLS inputs for the data plane. TLS is NOT enabled
+# merely by setting certificate paths; each phase has an explicit gate.
 #
 # Keep disabled until:
 #   - the organization CA/certificate workflow is known;

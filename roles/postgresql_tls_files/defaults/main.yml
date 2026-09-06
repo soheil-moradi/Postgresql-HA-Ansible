@@ -11,3 +11,34 @@ postgresql_tls_ca_file: "/etc/postgresql/tls/ca.crt"
 postgresql_tls_server_cert_source: ""
 postgresql_tls_server_key_source: ""
 postgresql_tls_ca_source: ""
+
+patroni_rest_tls_enabled: false
+patroni_rest_tls_verify_client: "optional"
+patroni_rest_tls_directory: "/etc/patroni/tls"
+patroni_rest_tls_cert_file: "/etc/patroni/tls/server.crt"
+patroni_rest_tls_key_file: "/etc/patroni/tls/server.key"
+patroni_rest_tls_ca_file: "/etc/patroni/tls/ca.crt"
+patroni_rest_tls_ca_source: ""
+patroni_rest_tls_cert_source: ""
+patroni_rest_tls_key_source: ""
+patroni_rest_tls_expected_identities: {}
+
+etcd_tls_enabled: false
+etcd_tls_existing_cluster_migration_ack: false
+etcd_tls_migration_marker: "/etc/etcd/tls/.migration-complete"
+etcd_tls_directory: "/etc/etcd/tls"
+etcd_tls_ca_file: "/etc/etcd/tls/ca.crt"
+etcd_tls_server_cert_file: "/etc/etcd/tls/server.crt"
+etcd_tls_server_key_file: "/etc/etcd/tls/server.key"
+etcd_tls_peer_cert_file: "/etc/etcd/tls/peer.crt"
+etcd_tls_peer_key_file: "/etc/etcd/tls/peer.key"
+etcd_tls_client_cert_file: "/etc/etcd/tls/client.crt"
+etcd_tls_client_key_file: "/etc/etcd/tls/client.key"
+etcd_tls_ca_source: ""
+etcd_tls_server_cert_source: ""
+etcd_tls_server_key_source: ""
+etcd_tls_peer_cert_source: ""
+etcd_tls_peer_key_source: ""
+etcd_tls_client_cert_source: ""
+etcd_tls_client_key_source: ""
+etcd_tls_expected_identities: {}

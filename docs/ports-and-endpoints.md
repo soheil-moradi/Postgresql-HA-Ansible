@@ -15,6 +15,11 @@ Normal applications should use the service DNS/VIP rather than a fixed node addr
 
 ## HA control plane
 
+The default transport is HTTP for backwards-safe staging. Setting
+`patroni_rest_tls_enabled` changes Patroni REST to HTTPS; setting
+`etcd_tls_enabled` changes etcd client and peer traffic to HTTPS/mTLS. The port
+numbers do not change.
+
 | Component | Default | Exposure |
 |---|---:|---|
 | Patroni REST | `8008/tcp` | Cluster nodes; approved monitoring if required |

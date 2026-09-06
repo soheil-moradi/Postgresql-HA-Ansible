@@ -4,6 +4,8 @@
 scrape_configs:
   - job_name: patroni
     metrics_path: /metrics
+    # Set scheme: https and add tls_config when patroni_rest_tls_enabled=true.
+    # The default verify_client=optional does not require a client certificate.
     static_configs:
       - targets:
           - "<PG-NODE-01>:8008"
@@ -12,6 +14,13 @@ scrape_configs:
 
   - job_name: etcd
     metrics_path: /metrics
+    # etcd TLS uses client authentication. Replace these placeholders with the
+    # monitoring client's CA/certificate/key delivered by your secret system.
+    # scheme: https
+    # tls_config:
+    #   ca_file: /etc/prometheus/tls/etcd-ca.crt
+    #   cert_file: /etc/prometheus/tls/etcd-client.crt
+    #   key_file: /etc/prometheus/tls/etcd-client.key
     static_configs:
       - targets:
           - "<PG-NODE-01>:2379"

@@ -19,9 +19,10 @@
 
     - name: Converge external archive settings without touching unrelated DCS keys
       patroni_dynamic_config:
-        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}"
+        url: "{{ patroni_rest_scheme }}://{{ ansible_host }}:{{ patroni_rest_port }}"
         username: "{{ patroni_rest_username }}"
         password: "{{ vault_patroni_rest_password }}"
+        ca_file: "{{ patroni_rest_tls_ca_file if (patroni_rest_tls_enabled | bool) else omit }}"
         desired:
           postgresql:
             parameters:

@@ -8,6 +8,42 @@
     - role: common
     - role: storage
 
+- name: Install service-owner packages before publishing TLS identities
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Install packages that create the etcd and postgres service accounts
+      ansible.builtin.apt:
+        name:
+          - etcd-client
+          - etcd-server
+          - postgresql-common
+          - patroni
+          - postgresql-{{ postgresql_version }}
+          - postgresql-client-{{ postgresql_version }}
+          - python3-etcd
+          - python3-psycopg2
+        state: present
+        policy_rc_d: 101
+      when: >-
+        (postgresql_tls_certificate_deployment_enabled | default(false) | bool)
+        or (patroni_rest_tls_enabled | default(false) | bool)
+        or (etcd_tls_enabled | default(false) | bool)
+
+- name: Publish and validate TLS identities before stateful services start
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: postgresql_tls_files
+      when: >-
+        (postgresql_tls_certificate_deployment_enabled | default(false) | bool)
+        or (patroni_rest_tls_enabled | default(false) | bool)
+        or (etcd_tls_enabled | default(false) | bool)
+
 - name: Install and bootstrap etcd quorum
   hosts: postgresql_cluster
   become: true
@@ -100,9 +136,11 @@
 
     - name: Wait until the new cluster has a PostgreSQL primary
       ansible.builtin.uri:
-        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}/primary"
+        url: "{{ patroni_rest_scheme }}://{{ ansible_host }}:{{ patroni_rest_port }}/primary"
         method: GET
         status_code: 200
+        validate_certs: "{{ patroni_rest_tls_enabled | bool }}"
+        ca_path: "{{ patroni_rest_tls_ca_file if (patroni_rest_tls_enabled | bool) else omit }}"
       register: patroni_fresh_bootstrap_check
       retries: 40
       delay: 5
@@ -125,9 +163,11 @@
 
     - name: Wait until the local PostgreSQL instance is healthy
       ansible.builtin.uri:
-        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}/health"
+        url: "{{ patroni_rest_scheme }}://{{ ansible_host }}:{{ patroni_rest_port }}/health"
         method: GET
         status_code: 200
+        validate_certs: "{{ patroni_rest_tls_enabled | bool }}"
+        ca_path: "{{ patroni_rest_tls_ca_file if (patroni_rest_tls_enabled | bool) else omit }}"
       register: patroni_local_health
       retries: 60
       delay: 5

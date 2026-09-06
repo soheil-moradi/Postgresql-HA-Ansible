@@ -1,11 +1,20 @@
 ---
 # Certificate deployment only. This playbook does NOT enable PostgreSQL TLS.
+# It can also publish the optional Patroni REST and etcd identities when their
+# feature flags and certificate sources are enabled.
 
 - name: Deploy PostgreSQL TLS certificate files
   hosts: postgresql_cluster
   any_errors_fatal: true
   become: true
   gather_facts: false
+  pre_tasks:
+    - name: Require the complete cluster for certificate publication
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | sort == groups['postgresql_cluster'] | sort
+        fail_msg: Certificate deployment must run on all PostgreSQL nodes; remove --limit.
+      run_once: true
 
   roles:
     - postgresql_tls_files

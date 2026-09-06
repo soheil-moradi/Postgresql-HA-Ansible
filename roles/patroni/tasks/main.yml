@@ -26,6 +26,20 @@
     state: present
     policy_rc_d: 101
 
+- name: Check Patroni and PostgreSQL TLS files before rendering secure endpoints
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop: "{{ ([patroni_rest_tls_ca_file, patroni_rest_tls_cert_file, patroni_rest_tls_key_file] if (patroni_rest_tls_enabled | bool) else []) + ([etcd_tls_ca_file, etcd_tls_client_cert_file, etcd_tls_client_key_file] if (etcd_tls_enabled | bool) else []) + ([postgresql_tls_ca_file, postgresql_tls_server_cert_file, postgresql_tls_server_key_file] if (postgresql_tls_activation_enabled | bool) else []) }}"
+  register: patroni_tls_file_stats
+
+- name: Refuse to render a TLS-enabled Patroni configuration without files
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+    fail_msg: 'Missing Patroni/PostgreSQL TLS file: {{ item.item }}'
+  loop: '{{ patroni_tls_file_stats.results }}'
+
 - name: Stop and disable the distro PostgreSQL wrapper service
   ansible.builtin.systemd_service:
     name: postgresql

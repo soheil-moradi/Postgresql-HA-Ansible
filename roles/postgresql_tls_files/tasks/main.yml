@@ -212,3 +212,398 @@
         state: absent
       when: tls_candidate.path is defined
       no_log: true
+
+- name: Deploy and validate Patroni REST TLS material
+  when: patroni_rest_tls_enabled | bool
+  block:
+    - name: Validate Patroni REST TLS source inputs
+      ansible.builtin.assert:
+        that:
+          - patroni_rest_tls_cert_source | length > 0
+          - patroni_rest_tls_key_source | length > 0
+          - patroni_rest_tls_ca_source | length > 0
+          - patroni_rest_tls_verify_client in ['none', 'optional']
+        fail_msg: Configure Patroni REST certificate, private key, CA source and a valid client-verification mode.
+
+    - name: Create Patroni REST TLS directory
+      ansible.builtin.file:
+        path: '{{ patroni_rest_tls_directory }}'
+        state: directory
+        owner: root
+        group: postgres
+        mode: '0750'
+
+    - name: Create Patroni REST TLS staging directory
+      ansible.builtin.tempfile:
+        state: directory
+        path: '{{ patroni_rest_tls_directory }}'
+        prefix: .candidate-
+      register: patroni_rest_tls_candidate
+
+    - name: Stage Patroni REST TLS certificate files
+      ansible.builtin.copy:
+        src: '{{ item.src }}'
+        dest: '{{ patroni_rest_tls_candidate.path }}/{{ item.name }}'
+        owner: '{{ item.owner }}'
+        group: postgres
+        mode: '{{ item.mode }}'
+      loop:
+        - name: server.crt
+          src: '{{ patroni_rest_tls_cert_source }}'
+          owner: root
+          mode: '0644'
+        - name: server.key
+          src: '{{ patroni_rest_tls_key_source }}'
+          owner: postgres
+          mode: '0600'
+        - name: ca.crt
+          src: '{{ patroni_rest_tls_ca_source }}'
+          owner: root
+          mode: '0644'
+      no_log: true
+
+    - name: Validate Patroni REST TLS server certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - '{{ patroni_rest_tls_candidate.path }}/server.crt'
+          - -noout
+          - -subject
+          - -issuer
+          - -dates
+      changed_when: false
+
+    - name: Validate Patroni REST TLS private key
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - pkey
+          - -in
+          - '{{ patroni_rest_tls_candidate.path }}/server.key'
+          - -noout
+          - -check
+      changed_when: false
+      no_log: true
+
+    - name: Validate Patroni REST TLS CA
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - '{{ patroni_rest_tls_candidate.path }}/ca.crt'
+          - -noout
+          - -subject
+      changed_when: false
+
+    - name: Validate Patroni REST TLS certificate and key match
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cert_fp="$(openssl x509 -in "{{ patroni_rest_tls_candidate.path }}/server.crt" -pubkey -noout |
+          openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
+        key_fp="$(openssl pkey -in "{{ patroni_rest_tls_candidate.path }}/server.key" -pubout -outform DER 2>/dev/null |
+          sha256sum | awk '{print $1}')"
+        test "$cert_fp" = "$key_fp"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      no_log: true
+
+    - name: Validate Patroni REST TLS certificate chain
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - verify
+          - -purpose
+          - sslserver
+          - -CAfile
+          - '{{ patroni_rest_tls_candidate.path }}/ca.crt'
+          - '{{ patroni_rest_tls_candidate.path }}/server.crt'
+      changed_when: false
+
+    - name: Validate Patroni REST TLS DNS SAN identities
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - '{{ patroni_rest_tls_candidate.path }}/server.crt'
+          - -noout
+          - -checkhost
+          - '{{ item }}'
+      loop: '{{ patroni_rest_tls_expected_identities.get(inventory_hostname, {}).get(''dns'', []) }}'
+      loop_control:
+        label: '{{ item }}'
+      changed_when: false
+
+    - name: Validate Patroni REST TLS IP SAN identities
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - '{{ patroni_rest_tls_candidate.path }}/server.crt'
+          - -noout
+          - -checkip
+          - '{{ item }}'
+      loop: '{{ patroni_rest_tls_expected_identities.get(inventory_hostname, {}).get(''ip'', []) }}'
+      loop_control:
+        label: '{{ item }}'
+      changed_when: false
+
+    - name: Publish validated Patroni REST TLS files
+      ansible.builtin.copy:
+        src: '{{ patroni_rest_tls_candidate.path }}/{{ item.name }}'
+        dest: '{{ item.dest }}'
+        remote_src: true
+        owner: '{{ item.owner }}'
+        group: postgres
+        mode: '{{ item.mode }}'
+      loop:
+        - name: server.crt
+          dest: '{{ patroni_rest_tls_cert_file }}'
+          owner: root
+          mode: '0644'
+        - name: server.key
+          dest: '{{ patroni_rest_tls_key_file }}'
+          owner: postgres
+          mode: '0600'
+        - name: ca.crt
+          dest: '{{ patroni_rest_tls_ca_file }}'
+          owner: root
+          mode: '0644'
+      no_log: true
+  always:
+    - name: Remove Patroni REST TLS staging files
+      ansible.builtin.file:
+        path: '{{ patroni_rest_tls_candidate.path }}'
+        state: absent
+      when: patroni_rest_tls_candidate.path is defined
+      no_log: true
+
+- name: Deploy and validate etcd TLS material
+  when: etcd_tls_enabled | bool
+  block:
+    - name: Validate etcd TLS source inputs
+      ansible.builtin.assert:
+        that:
+          - etcd_tls_ca_source | length > 0
+          - etcd_tls_server_cert_source | length > 0
+          - etcd_tls_server_key_source | length > 0
+          - etcd_tls_peer_cert_source | length > 0
+          - etcd_tls_peer_key_source | length > 0
+          - etcd_tls_client_cert_source | length > 0
+          - etcd_tls_client_key_source | length > 0
+        fail_msg: Configure etcd CA, server, peer and client certificate/key sources before enabling etcd TLS.
+
+    - name: Create etcd TLS directory
+      ansible.builtin.file:
+        path: '{{ etcd_tls_directory }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create etcd TLS staging directory
+      ansible.builtin.tempfile:
+        state: directory
+        path: '{{ etcd_tls_directory }}'
+        prefix: .candidate-
+      register: etcd_tls_candidate
+
+    - name: Stage etcd TLS certificate files
+      ansible.builtin.copy:
+        src: '{{ item.src }}'
+        dest: '{{ etcd_tls_candidate.path }}/{{ item.name }}'
+        owner: '{{ item.owner }}'
+        group: etcd
+        mode: '{{ item.mode }}'
+      loop:
+        - name: ca.crt
+          src: '{{ etcd_tls_ca_source }}'
+          owner: root
+          mode: '0644'
+        - name: server.crt
+          src: '{{ etcd_tls_server_cert_source }}'
+          owner: root
+          mode: '0644'
+        - name: server.key
+          src: '{{ etcd_tls_server_key_source }}'
+          owner: etcd
+          mode: '0600'
+        - name: peer.crt
+          src: '{{ etcd_tls_peer_cert_source }}'
+          owner: root
+          mode: '0644'
+        - name: peer.key
+          src: '{{ etcd_tls_peer_key_source }}'
+          owner: etcd
+          mode: '0600'
+        - name: client.crt
+          src: '{{ etcd_tls_client_cert_source }}'
+          owner: root
+          mode: '0644'
+        - name: client.key
+          src: '{{ etcd_tls_client_key_source }}'
+          owner: postgres
+          mode: '0600'
+      no_log: true
+
+    - name: Validate etcd TLS certificates
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - '{{ etcd_tls_candidate.path }}/{{ item }}'
+          - -noout
+          - -subject
+          - -issuer
+          - -dates
+      loop:
+        - server.crt
+        - peer.crt
+        - client.crt
+        - ca.crt
+      changed_when: false
+
+    - name: Validate etcd TLS private keys
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - pkey
+          - -in
+          - '{{ etcd_tls_candidate.path }}/{{ item }}'
+          - -noout
+          - -check
+      loop:
+        - server.key
+        - peer.key
+        - client.key
+      changed_when: false
+      no_log: true
+
+    - name: Validate etcd TLS certificate and key pairs
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cert_fp="$(openssl x509 -in "{{ etcd_tls_candidate.path }}/{{ item.cert }}" -pubkey -noout |
+          openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
+        key_fp="$(openssl pkey -in "{{ etcd_tls_candidate.path }}/{{ item.key }}" -pubout -outform DER 2>/dev/null |
+          sha256sum | awk '{print $1}')"
+        test "$cert_fp" = "$key_fp"
+      args:
+        executable: /bin/bash
+      loop:
+        - cert: server.crt
+          key: server.key
+        - cert: peer.crt
+          key: peer.key
+        - cert: client.crt
+          key: client.key
+      changed_when: false
+      no_log: true
+
+    - name: Validate etcd TLS server and peer certificate chains
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - verify
+          - -purpose
+          - sslserver
+          - -CAfile
+          - '{{ etcd_tls_candidate.path }}/ca.crt'
+          - '{{ etcd_tls_candidate.path }}/{{ item }}'
+      loop:
+        - server.crt
+        - peer.crt
+      changed_when: false
+
+    - name: Validate etcd TLS client certificate purpose
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - verify
+          - -purpose
+          - sslclient
+          - -CAfile
+          - '{{ etcd_tls_candidate.path }}/ca.crt'
+          - '{{ etcd_tls_candidate.path }}/client.crt'
+      changed_when: false
+
+    - name: Validate etcd TLS DNS SAN identities on server and peer certificates
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - '{{ etcd_tls_candidate.path }}/{{ item[0] }}'
+          - -noout
+          - -checkhost
+          - '{{ item[1] }}'
+      loop: '{{ etcd_tls_expected_identities.get(inventory_hostname, {}).get(''dns'', []) | product([''server.crt'', ''peer.crt'']) | map(''reverse'') | map(''list'') | list }}'
+      loop_control:
+        label: '{{ item[1] }}:{{ item[0] }}'
+      changed_when: false
+
+    - name: Validate etcd TLS IP SAN identities on server and peer certificates
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - '{{ etcd_tls_candidate.path }}/{{ item[0] }}'
+          - -noout
+          - -checkip
+          - '{{ item[1] }}'
+      loop: '{{ etcd_tls_expected_identities.get(inventory_hostname, {}).get(''ip'', []) | product([''server.crt'', ''peer.crt'']) | map(''reverse'') | map(''list'') | list }}'
+      loop_control:
+        label: '{{ item[1] }}:{{ item[0] }}'
+      changed_when: false
+
+    - name: Publish validated etcd TLS files
+      ansible.builtin.copy:
+        src: '{{ etcd_tls_candidate.path }}/{{ item.name }}'
+        dest: '{{ item.dest }}'
+        remote_src: true
+        owner: '{{ item.owner }}'
+        group: etcd
+        mode: '{{ item.mode }}'
+      loop:
+        - name: ca.crt
+          dest: '{{ etcd_tls_ca_file }}'
+          owner: root
+          mode: '0644'
+        - name: server.crt
+          dest: '{{ etcd_tls_server_cert_file }}'
+          owner: root
+          mode: '0644'
+        - name: server.key
+          dest: '{{ etcd_tls_server_key_file }}'
+          owner: etcd
+          mode: '0600'
+        - name: peer.crt
+          dest: '{{ etcd_tls_peer_cert_file }}'
+          owner: root
+          mode: '0644'
+        - name: peer.key
+          dest: '{{ etcd_tls_peer_key_file }}'
+          owner: etcd
+          mode: '0600'
+        - name: client.crt
+          dest: '{{ etcd_tls_client_cert_file }}'
+          owner: root
+          mode: '0644'
+        - name: client.key
+          dest: '{{ etcd_tls_client_key_file }}'
+          owner: postgres
+          mode: '0600'
+      no_log: true
+  always:
+    - name: Remove etcd TLS staging files
+      ansible.builtin.file:
+        path: '{{ etcd_tls_candidate.path }}'
+        state: absent
+      when: etcd_tls_candidate.path is defined
+      no_log: true

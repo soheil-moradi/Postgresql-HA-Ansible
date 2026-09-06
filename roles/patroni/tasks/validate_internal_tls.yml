@@ -21,7 +21,7 @@
     PGPASSWORD: "{{ vault_postgres_superuser_password }}"
     PGDATABASE: postgres
     PGSSLMODE: "{{ postgresql_tls_internal_sslmode }}"
-    PGSSLROOTCERT: "{{ postgresql_tls_ca_file }}"
+    PGSSLROOTCERT: "{{ postgresql_tls_ca_file if (postgresql_tls_internal_sslmode | default('prefer')) not in ['prefer', 'disable'] else omit }}"
     PGCONNECT_TIMEOUT: '5'
     PGOPTIONS: '-c statement_timeout=10000'
   loop: "{{ groups['postgresql_cluster'] }}"

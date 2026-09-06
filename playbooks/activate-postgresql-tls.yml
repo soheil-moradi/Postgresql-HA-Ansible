@@ -111,15 +111,17 @@
   tasks:
     - name: Activate TLS through the DCS after all-node preflight
       patroni_dynamic_config:
-        url: http://{{ ansible_host }}:{{ patroni_rest_port }}
+        url: "{{ patroni_rest_scheme }}://{{ ansible_host }}:{{ patroni_rest_port }}"
         username: '{{ patroni_rest_username }}'
         password: '{{ vault_patroni_rest_password }}'
+        ca_file: '{{ patroni_rest_tls_ca_file if (patroni_rest_tls_enabled | bool) else omit }}'
         desired:
           postgresql:
             parameters:
               ssl: 'on'
               ssl_cert_file: '{{ postgresql_tls_server_cert_file }}'
               ssl_key_file: '{{ postgresql_tls_server_key_file }}'
+              ssl_ca_file: '{{ postgresql_tls_ca_file }}'
               ssl_min_protocol_version: '{{ postgresql_tls_min_protocol_version }}'
       when: postgresql_tls_activation_enabled | bool
 - name: Verify active encrypted connections on every node

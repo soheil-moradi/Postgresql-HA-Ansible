@@ -78,6 +78,9 @@
     argv: [etcdctl, "--endpoints={{ etcd_client_endpoints_csv }}", endpoint, health]
   environment:
     ETCDCTL_API: '3'
+    ETCDCTL_CACERT: "{{ etcd_tls_ca_file if (etcd_tls_enabled | bool) else omit }}"
+    ETCDCTL_CERT: "{{ etcd_tls_client_cert_file if (etcd_tls_enabled | bool) else omit }}"
+    ETCDCTL_KEY: "{{ etcd_tls_client_key_file if (etcd_tls_enabled | bool) else omit }}"
   changed_when: false
   when: not ansible_check_mode
 

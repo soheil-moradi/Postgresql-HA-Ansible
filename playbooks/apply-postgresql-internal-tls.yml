@@ -34,8 +34,10 @@
 
     - name: Verify local PostgreSQL remains healthy
       ansible.builtin.uri:
-        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}/health"
+        url: "{{ patroni_rest_scheme }}://{{ ansible_host }}:{{ patroni_rest_port }}/health"
         status_code: 200
+        validate_certs: "{{ patroni_rest_tls_enabled | bool }}"
+        ca_path: "{{ patroni_rest_tls_ca_file if (patroni_rest_tls_enabled | bool) else omit }}"
       register: internal_tls_health
       retries: 20
       delay: 2
