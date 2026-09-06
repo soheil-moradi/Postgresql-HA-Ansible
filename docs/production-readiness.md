@@ -5,7 +5,7 @@
 ## One-command safe audit
 
 ```bash
-./scripts/final-readiness-check.sh .
+bash scripts/final-readiness-check.sh . --ask-vault-pass -K
 ```
 
 The script performs:
@@ -97,3 +97,5 @@ automated package changes
 - keep example values generic;
 - review `git diff` and `git status`;
 - run the final readiness script again.
+
+See [production fixes and current validation limits](production-fixes.md) for this revision.

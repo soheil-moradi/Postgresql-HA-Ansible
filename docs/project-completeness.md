@@ -97,3 +97,7 @@ This checklist distinguishes **implemented repository capabilities** from **envi
 ## Final acceptance
 
 Before treating a deployment as production-ready, complete the environment-specific unchecked items that match the deployment's security, backup, observability and recovery requirements.
+
+## Updated implementation
+
+The [production patch guide](production-fixes.md) supersedes older placeholder/activation notes above and explains the newly implemented workflows and outstanding environment validation.

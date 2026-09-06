@@ -15,7 +15,7 @@ User={{ postgresql_exporter_os_user }}
 Group={{ postgresql_exporter_os_user }}
 
 EnvironmentFile=
-Environment="DATA_SOURCE_NAME=host=/var/run/postgresql port=5432 dbname={{ postgresql_exporter_database }} user={{ postgresql_exporter_db_role }} sslmode=disable application_name=postgres_exporter"
+Environment="DATA_SOURCE_NAME=host=/var/run/postgresql port={{ postgresql_port }} dbname={{ postgresql_exporter_database }} user={{ postgresql_exporter_db_role }} sslmode=disable application_name=postgres_exporter"
 
 ExecStart=
 ExecStart={{ postgresql_exporter_binary }} \

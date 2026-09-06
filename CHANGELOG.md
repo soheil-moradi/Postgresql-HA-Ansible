@@ -38,3 +38,14 @@
 - node rebuild/rejoin runbook
 - failover/switchover test documentation
 - final production-readiness/self-check workflow
+
+## 2026-09-05 — Production reliability fixes
+
+- Fix preflight, YAML secret encoding, Patroni reload errors and existing-cluster DCS convergence.
+- Serialize load-balancer changes and use graceful HAProxy reload.
+- Enforce readonly downgrades and reject inherited write rights.
+- Gate TLS on all-node prerequisites; implement internal TLS and hostssl workflows.
+- Add opt-in managed-port nftables enforcement with timed rollback.
+- Add opt-in encrypted pgBackRest on a verified shared off-host NFS repository.
+- Add committed VIP/replica probes, regression tests and PostgreSQL 16 CI tests.
+- Document unexecuted live HA, firewall, backup and restore acceptance tests.

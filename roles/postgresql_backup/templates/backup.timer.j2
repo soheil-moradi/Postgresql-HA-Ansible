@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule PostgreSQL {{ item.kind }} backup
+
+[Timer]
+OnCalendar={{ item.calendar }}
+Persistent=true
+RandomizedDelaySec=60
+Unit=pg-ha-backup-{{ item.kind }}.service
+
+[Install]
+WantedBy=timers.target

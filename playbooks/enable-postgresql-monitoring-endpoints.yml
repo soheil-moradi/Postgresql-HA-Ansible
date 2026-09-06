@@ -1,19 +1,9 @@
 ---
-# Enable BOTH requested monitoring endpoints:
-#
-#   postgres_exporter  http://<node>:9187/metrics
-#   HAProxy PROMEX     http://<node>:8404/metrics
-#
-# Patroni :8008/metrics and etcd :2379/metrics already exist.
-#
-# No node_exporter configuration is touched.
-
 - name: Preflight monitoring endpoint dependencies
   hosts: postgresql_cluster
   become: true
   gather_facts: false
   any_errors_fatal: true
-
   tasks:
     - name: Read postgres_exporter APT candidate from configured internal repositories
       ansible.builtin.shell: |
@@ -24,17 +14,15 @@
         executable: /bin/bash
       register: monitoring_postgres_exporter_candidate
       changed_when: false
-
+      when: postgresql_exporter_enabled | bool
     - name: Require postgres_exporter package in configured APT repositories
       ansible.builtin.assert:
         that:
           - monitoring_postgres_exporter_candidate.stdout | trim | length > 0
           - monitoring_postgres_exporter_candidate.stdout | trim != '(none)'
-        fail_msg: >-
-          prometheus-postgres-exporter has no APT candidate on this node.
-          Add the Ubuntu Noble package to the approved internal repository
-          before running this playbook again. No monitoring change was made.
-
+        fail_msg: prometheus-postgres-exporter has no APT candidate on this node. Add the Ubuntu Noble package to
+          the approved internal repository before running this playbook again. No monitoring change was made.
+      when: postgresql_exporter_enabled | bool
     - name: Verify HAProxy contains built-in Prometheus exporter
       ansible.builtin.command:
         argv:
@@ -42,18 +30,21 @@
           - -vv
       register: monitoring_haproxy_build
       changed_when: false
-
+      when: haproxy_prometheus_enabled | bool
     - name: Require HAProxy PROMEX support
       ansible.builtin.assert:
         that:
-          - "'prometheus-exporter' in monitoring_haproxy_build.stdout"
-        fail_msg: "Installed HAProxy does not expose the prometheus-exporter service."
-
+          - '''prometheus-exporter'' in monitoring_haproxy_build.stdout'
+        fail_msg: Installed HAProxy does not expose the prometheus-exporter service.
+      when: haproxy_prometheus_enabled | bool
+  pre_tasks:
+    - name: Skip explicitly disabled monitoring changes
+      ansible.builtin.meta: end_play
+      when: not (postgresql_ha_monitoring_enabled | bool)
 - name: Create least-privilege PostgreSQL monitoring role on current Patroni Leader
   hosts: postgresql_cluster[0]
   become: true
   gather_facts: false
-
   tasks:
     - name: Read Patroni topology
       ansible.builtin.command:
@@ -62,15 +53,14 @@
           - -c
           - /etc/patroni/patroni.yml
           - list
-          - "{{ postgres_cluster_name }}"
+          - '{{ postgres_cluster_name }}'
           - --format
           - json
       register: monitoring_patroni_topology
       changed_when: false
-
     - name: Resolve current Patroni Leader
       ansible.builtin.set_fact:
-        monitoring_patroni_leaders: >-
+        monitoring_patroni_leaders: |-
           {{
             monitoring_patroni_topology.stdout
             | from_json
@@ -78,18 +68,15 @@
             | map(attribute='Member')
             | list
           }}
-
     - name: Require exactly one Patroni Leader
       ansible.builtin.assert:
         that:
           - monitoring_patroni_leaders | length == 1
           - monitoring_patroni_leaders[0] in groups['postgresql_cluster']
-        fail_msg: "Cannot safely create monitoring role without exactly one Patroni Leader."
-
+        fail_msg: Cannot safely create monitoring role without exactly one Patroni Leader.
     - name: Store current Patroni Leader
       ansible.builtin.set_fact:
-        monitoring_patroni_leader: "{{ monitoring_patroni_leaders[0] }}"
-
+        monitoring_patroni_leader: '{{ monitoring_patroni_leaders[0] }}'
     - name: Create and harden postgres_exporter database role
       become_user: postgres
       ansible.builtin.shell: |
@@ -193,12 +180,9 @@
         SQL
       args:
         executable: /bin/bash
-      delegate_to: "{{ monitoring_patroni_leader }}"
+      delegate_to: '{{ monitoring_patroni_leader }}'
       register: monitoring_role_apply
-      changed_when: >-
-        'ANSIBLE_MANAGED_CHANGE' in
-        (monitoring_role_apply.stdout ~ monitoring_role_apply.stderr)
-
+      changed_when: '''ANSIBLE_MANAGED_CHANGE'' in (monitoring_role_apply.stdout ~ monitoring_role_apply.stderr)'
     - name: Validate postgres_exporter role is non-superuser and has pg_monitor
       become_user: postgres
       ansible.builtin.command:
@@ -209,7 +193,7 @@
           - -d
           - postgres
           - -c
-          - >-
+          - |-
             SELECT
               r.rolcanlogin::text || '|' ||
               r.rolsuper::text || '|' ||
@@ -217,30 +201,36 @@
               r.rolcreaterole::text || '|' ||
               pg_has_role('{{ postgresql_exporter_db_role }}', 'pg_monitor', 'MEMBER')::text || '|' ||
               (a.rolpassword IS NULL)::text
-            FROM pg_roles r
-            JOIN pg_authid a ON a.oid = r.oid
-            WHERE r.rolname='{{ postgresql_exporter_db_role }}';
-      delegate_to: "{{ monitoring_patroni_leader }}"
+            FROM pg_roles r JOIN pg_authid a ON a.oid = r.oid WHERE r.rolname='{{ postgresql_exporter_db_role }}';
+      delegate_to: '{{ monitoring_patroni_leader }}'
       register: monitoring_role_validation
       changed_when: false
       failed_when: monitoring_role_validation.stdout | trim != 'true|false|false|false|true|true'
-
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Skip explicitly disabled monitoring changes
+      ansible.builtin.meta: end_play
+      when: not (postgresql_ha_monitoring_enabled | bool and postgresql_exporter_enabled | bool)
 - name: Install and configure PostgreSQL exporter on every DB node
   hosts: postgresql_cluster
   become: true
   gather_facts: false
-
   roles:
     - postgresql_monitoring_exporters
-
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Skip explicitly disabled monitoring changes
+      ansible.builtin.meta: end_play
+      when: not (postgresql_ha_monitoring_enabled | bool and postgresql_exporter_enabled | bool)
+  serial: 1
 - name: Render HAProxy configuration with built-in Prometheus endpoint
   hosts: postgresql_cluster
+  serial: 1
+  any_errors_fatal: true
   become: true
   gather_facts: false
-
   roles:
     - haproxy
-
   tasks:
     - name: Validate rendered HAProxy configuration
       ansible.builtin.command:
@@ -250,34 +240,36 @@
           - -f
           - /etc/haproxy/haproxy.cfg
       changed_when: false
-
     - name: Flush HAProxy handler before metrics validation
       ansible.builtin.meta: flush_handlers
-
     - name: Wait for HAProxy Prometheus listener
       ansible.builtin.wait_for:
-        host: "{{ ansible_host }}"
-        port: "{{ haproxy_prometheus_port }}"
+        host: '{{ ansible_host }}'
+        port: '{{ haproxy_prometheus_port }}'
         timeout: 20
-
+      when: haproxy_prometheus_enabled | bool
     - name: Read HAProxy Prometheus metrics
       ansible.builtin.uri:
-        url: "http://{{ ansible_host }}:{{ haproxy_prometheus_port }}{{ haproxy_prometheus_path }}"
+        url: http://{{ ansible_host }}:{{ haproxy_prometheus_port }}{{ haproxy_prometheus_path }}
         return_content: true
         status_code: 200
       register: monitoring_haproxy_metrics
       changed_when: false
-
+      when: haproxy_prometheus_enabled | bool
     - name: Assert HAProxy metrics are present
       ansible.builtin.assert:
         that:
-          - "'haproxy_' in monitoring_haproxy_metrics.content"
-        fail_msg: "HAProxy /metrics responded but no haproxy_* metrics were found."
-
+          - '''haproxy_'' in monitoring_haproxy_metrics.content'
+        fail_msg: HAProxy /metrics responded but no haproxy_* metrics were found.
+      when: haproxy_prometheus_enabled | bool
     - name: Print HAProxy endpoint
       ansible.builtin.debug:
         msg:
-          node: "{{ inventory_hostname }}"
-          endpoint: "http://{{ ansible_host }}:{{ haproxy_prometheus_port }}{{ haproxy_prometheus_path }}"
-
+          node: '{{ inventory_hostname }}'
+          endpoint: http://{{ ansible_host }}:{{ haproxy_prometheus_port }}{{ haproxy_prometheus_path }}
+      when: haproxy_prometheus_enabled | bool
+  pre_tasks:
+    - name: Skip explicitly disabled monitoring changes
+      ansible.builtin.meta: end_play
+      when: not (postgresql_ha_monitoring_enabled | bool)
 - import_playbook: validate.yml

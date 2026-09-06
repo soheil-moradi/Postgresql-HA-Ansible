@@ -1,0 +1,77 @@
+---
+- name: Install pgBackRest from approved repositories
+  ansible.builtin.apt:
+    name: pgbackrest
+    state: present
+    policy_rc_d: 101
+
+- name: Create local pgBackRest configuration, log and lock directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: '0750'
+  loop: [/etc/pgbackrest, /var/log/pgbackrest, /var/lib/pgbackrest]
+
+- name: Install repository guard and primary-only backup runner
+  ansible.builtin.copy:
+    src: ha_backup.py
+    dest: /usr/local/sbin/pg-ha-backup
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Write reviewed repository identity for runtime checks
+  ansible.builtin.copy:
+    dest: /etc/pgbackrest/ha-repository.json
+    owner: root
+    group: postgres
+    mode: '0640'
+    content: "{{ {'mount': postgresql_backup_repository_mount, 'destination': postgresql_backup_destination, 'source': postgresql_backup_repository_source, 'stanza': postgres_cluster_name, 'port': postgresql_port, 'pgdata': postgres_mount_point ~ '/' ~ (postgresql_version | string) ~ '/patroni'} | to_nice_json }}"
+
+- name: Verify mounted repository as PostgreSQL user before configuration
+  become_user: postgres
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/pg-ha-backup, verify]
+  changed_when: false
+
+- name: Deploy encrypted pgBackRest configuration
+  ansible.builtin.template:
+    src: pgbackrest.conf.j2
+    dest: /etc/pgbackrest/pgbackrest.conf
+    owner: postgres
+    group: postgres
+    mode: '0600'
+  no_log: true
+
+- name: Validate pgBackRest configuration
+  become_user: postgres
+  ansible.builtin.command:
+    argv: [pgbackrest, "--stanza={{ postgres_cluster_name }}", --output=json, info]
+  changed_when: false
+  no_log: true
+
+- name: Install full and differential backup services
+  ansible.builtin.template:
+    src: backup.service.j2
+    dest: "/etc/systemd/system/pg-ha-backup-{{ item.kind }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ postgresql_backup_schedules }}"
+
+- name: Install full and differential backup timers
+  ansible.builtin.template:
+    src: backup.timer.j2
+    dest: "/etc/systemd/system/pg-ha-backup-{{ item.kind }}.timer"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ postgresql_backup_schedules }}"
+
+- name: Validate configured backup calendars
+  ansible.builtin.command:
+    argv: [systemd-analyze, calendar, "{{ item.calendar }}"]
+  loop: "{{ postgresql_backup_schedules }}"
+  changed_when: false

@@ -3,6 +3,7 @@
 
 - name: Deploy PostgreSQL TLS certificate files
   hosts: postgresql_cluster
+  any_errors_fatal: true
   become: true
   gather_facts: false
 

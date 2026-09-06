@@ -1,63 +1,46 @@
 ---
-# PostgreSQL TLS activation capability.
-#
-# DEFAULT:
-#   postgresql_tls_activation_enabled: false
-#
-# IMPORTANT:
-#   This playbook can write Patroni dynamic configuration when explicitly
-#   enabled, but it intentionally does NOT restart the cluster and does NOT
-#   enforce hostssl. Those are separate controlled rollout stages.
-
 - name: Validate PostgreSQL TLS activation prerequisites
   hosts: postgresql_cluster
+  any_errors_fatal: true
   become: true
   gather_facts: false
-
   tasks:
     - name: Explain why PostgreSQL TLS activation is disabled
       ansible.builtin.debug:
-        msg: >-
-          PostgreSQL TLS activation is disabled. No Patroni/PostgreSQL setting,
-          service state, certificate file, or pg_hba rule is changed.
+        msg: PostgreSQL TLS activation is disabled. No Patroni/PostgreSQL setting, service state, certificate file,
+          or pg_hba rule is changed.
       when: not postgresql_tls_activation_enabled | bool
-
     - name: Check PostgreSQL server certificate
       ansible.builtin.stat:
-        path: "{{ postgresql_tls_server_cert_file }}"
+        path: '{{ postgresql_tls_server_cert_file }}'
       register: postgresql_tls_activation_cert
       when: postgresql_tls_activation_enabled | bool
-
     - name: Check PostgreSQL server private key
       ansible.builtin.stat:
-        path: "{{ postgresql_tls_server_key_file }}"
+        path: '{{ postgresql_tls_server_key_file }}'
       register: postgresql_tls_activation_key
       when: postgresql_tls_activation_enabled | bool
-
     - name: Assert TLS certificate and key exist on every DB node
       ansible.builtin.assert:
         that:
           - postgresql_tls_activation_cert.stat.exists
           - postgresql_tls_activation_key.stat.exists
           - postgresql_tls_activation_key.stat.isreg
-        fail_msg: >-
-          Refusing TLS activation because the server certificate/private key
-          are not present on this DB node.
+        fail_msg: Refusing TLS activation because the server certificate/private key are not present on this DB
+          node.
       when: postgresql_tls_activation_enabled | bool
-
     - name: Validate certificate is still sufficiently valid
       ansible.builtin.command:
         argv:
           - openssl
           - x509
           - -in
-          - "{{ postgresql_tls_server_cert_file }}"
+          - '{{ postgresql_tls_server_cert_file }}'
           - -noout
           - -checkend
-          - "{{ (postgresql_tls_minimum_validity_days | int) * 86400 }}"
+          - '{{ (postgresql_tls_minimum_validity_days | int) * 86400 }}'
       changed_when: false
       when: postgresql_tls_activation_enabled | bool
-
     - name: Validate certificate and private key match
       ansible.builtin.shell: |
         set -euo pipefail
@@ -79,20 +62,59 @@
       changed_when: false
       no_log: true
       when: postgresql_tls_activation_enabled | bool
-
+    - name: Verify server certificate chain and server-auth purpose
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - verify
+          - -purpose
+          - sslserver
+          - -CAfile
+          - '{{ postgresql_tls_ca_file }}'
+          - -untrusted
+          - '{{ postgresql_tls_server_cert_file }}'
+          - '{{ postgresql_tls_server_cert_file }}'
+      changed_when: false
+      when: postgresql_tls_activation_enabled | bool
+    - name: Ensure PostgreSQL can read and validate its private key
+      become_user: postgres
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - pkey
+          - -in
+          - '{{ postgresql_tls_server_key_file }}'
+          - -noout
+          - -check
+      changed_when: false
+      no_log: true
+      when: postgresql_tls_activation_enabled | bool
+    - name: Enforce secure server private-key ownership and permissions
+      ansible.builtin.assert:
+        that:
+          - (postgresql_tls_activation_key.stat.pw_name == 'postgres' and postgresql_tls_activation_key.stat.mode
+            == '0600') or (postgresql_tls_activation_key.stat.pw_name == 'root' and postgresql_tls_activation_key.stat.gr_name
+            == 'postgres' and postgresql_tls_activation_key.stat.mode in ['0600','0640'])
+      when: postgresql_tls_activation_enabled | bool
+  pre_tasks:
+    - name: Require whole-cluster activation checks
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | sort == groups['postgresql_cluster'] | sort
+        fail_msg: TLS activation must validate all nodes; remove --limit.
+      run_once: true
 - name: Prepare Patroni dynamic configuration for PostgreSQL TLS
   hosts: postgresql_cluster[0]
+  any_errors_fatal: true
   become: true
   gather_facts: false
-
   tasks:
-    - name: Render desired Patroni PostgreSQL TLS dynamic fragment
-      ansible.builtin.copy:
-        dest: /etc/patroni/dynamic-postgresql-tls.yml
-        owner: root
-        group: postgres
-        mode: "0640"
-        content: |
+    - name: Activate TLS through the DCS after all-node preflight
+      patroni_dynamic_config:
+        url: http://{{ ansible_host }}:{{ patroni_rest_port }}
+        username: '{{ patroni_rest_username }}'
+        password: '{{ vault_patroni_rest_password }}'
+        desired:
           postgresql:
             parameters:
               ssl: 'on'
@@ -100,116 +122,35 @@
               ssl_key_file: '{{ postgresql_tls_server_key_file }}'
               ssl_min_protocol_version: '{{ postgresql_tls_min_protocol_version }}'
       when: postgresql_tls_activation_enabled | bool
-
-    - name: Read current Patroni dynamic configuration
+- name: Verify active encrypted connections on every node
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Connect with CA verification and confirm session encryption
       ansible.builtin.command:
         argv:
-          - patronictl
-          - -c
-          - /etc/patroni/patroni.yml
-          - show-config
-          - "{{ postgres_cluster_name }}"
-      register: postgresql_tls_activation_current_config
+          - psql
+          - -X
+          - -v
+          - ON_ERROR_STOP=1
+          - -Atc
+          - SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid();
+      environment:
+        PGHOST: '{{ ansible_host }}'
+        PGPORT: '{{ postgresql_port | string }}'
+        PGUSER: '{{ patroni_superuser_username }}'
+        PGPASSWORD: '{{ vault_postgres_superuser_password }}'
+        PGDATABASE: postgres
+        PGSSLMODE: verify-ca
+        PGSSLROOTCERT: '{{ postgresql_tls_ca_file }}'
+        PGCONNECT_TIMEOUT: '5'
+      register: tls_active_probe
       changed_when: false
+      retries: 30
+      delay: 2
+      until: tls_active_probe.rc == 0 and tls_active_probe.stdout | trim == 't'
+      no_log: true
       when: postgresql_tls_activation_enabled | bool
-
-    - name: Parse current dynamic PostgreSQL TLS parameters
-      ansible.builtin.set_fact:
-        postgresql_tls_activation_current_parameters: >-
-          {{
-            (
-              postgresql_tls_activation_current_config.stdout
-              | from_yaml
-            ).get('postgresql', {}).get('parameters', {})
-          }}
-      when: postgresql_tls_activation_enabled | bool
-
-    - name: Build desired PostgreSQL TLS parameter subset
-      ansible.builtin.set_fact:
-        postgresql_tls_activation_desired_parameters:
-          ssl: "on"
-          ssl_cert_file: "{{ postgresql_tls_server_cert_file }}"
-          ssl_key_file: "{{ postgresql_tls_server_key_file }}"
-          ssl_min_protocol_version: "{{ postgresql_tls_min_protocol_version }}"
-      when: postgresql_tls_activation_enabled | bool
-
-    - name: Determine whether Patroni TLS dynamic parameters need change
-      ansible.builtin.set_fact:
-        postgresql_tls_activation_change_required: >-
-          {{
-            postgresql_tls_activation_current_parameters.get('ssl', '') | string
-            != postgresql_tls_activation_desired_parameters.ssl
-            or
-            postgresql_tls_activation_current_parameters.get('ssl_cert_file', '') | string
-            != postgresql_tls_activation_desired_parameters.ssl_cert_file
-            or
-            postgresql_tls_activation_current_parameters.get('ssl_key_file', '') | string
-            != postgresql_tls_activation_desired_parameters.ssl_key_file
-            or
-            postgresql_tls_activation_current_parameters.get('ssl_min_protocol_version', '') | string
-            != postgresql_tls_activation_desired_parameters.ssl_min_protocol_version
-          }}
-      when: postgresql_tls_activation_enabled | bool
-
-    - name: Print PostgreSQL TLS dynamic-config plan
-      ansible.builtin.debug:
-        msg:
-          activation_enabled: "{{ postgresql_tls_activation_enabled }}"
-          change_required: "{{ postgresql_tls_activation_change_required }}"
-          desired_parameters: "{{ postgresql_tls_activation_desired_parameters }}"
-          restart_policy: >-
-            No automatic restart. Review Patroni pending-restart state and use
-            the documented staged restart/switchover procedure.
-      when: postgresql_tls_activation_enabled | bool
-
-    - name: Apply PostgreSQL TLS parameters to Patroni DCS only when different
-      ansible.builtin.command:
-        argv:
-          - patronictl
-          - -c
-          - /etc/patroni/patroni.yml
-          - edit-config
-          - "{{ postgres_cluster_name }}"
-          - --apply
-          - /etc/patroni/dynamic-postgresql-tls.yml
-          - --force
-      when:
-        - postgresql_tls_activation_enabled | bool
-        - postgresql_tls_activation_change_required | bool
-      register: postgresql_tls_activation_apply
-      changed_when: true
-
-    - name: Read Patroni topology after TLS dynamic-config preparation
-      ansible.builtin.command:
-        argv:
-          - patronictl
-          - -c
-          - /etc/patroni/patroni.yml
-          - list
-          - "{{ postgres_cluster_name }}"
-          - --format
-          - json
-      register: postgresql_tls_activation_topology
-      changed_when: false
-      when: postgresql_tls_activation_enabled | bool
-
-    - name: Show pending-restart review information
-      ansible.builtin.debug:
-        msg:
-          topology: "{{ postgresql_tls_activation_topology.stdout | from_json }}"
-          next_stage: >-
-            TLS parameters are stored in Patroni DCS. Do not enforce hostssl.
-            Perform a controlled rolling PostgreSQL restart, verify encrypted
-            sessions and replication, then proceed to certificate verification
-            and hostssl enforcement as separate changes.
-      when: postgresql_tls_activation_enabled | bool
-
-    - name: Remove temporary dynamic TLS fragment
-      ansible.builtin.file:
-        path: /etc/patroni/dynamic-postgresql-tls.yml
-        state: absent
-      when: postgresql_tls_activation_enabled | bool
-
-# The current HA path should remain healthy because this playbook does not
-# restart PostgreSQL automatically.
 - import_playbook: validate.yml

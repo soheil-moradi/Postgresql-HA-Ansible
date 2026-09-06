@@ -56,3 +56,7 @@ Periodically re-test:
 - replica rebuild/rejoin;
 - backup restore/PITR;
 - disk expansion in a safe environment.
+
+## Updated implementation
+
+The [production patch guide](production-fixes.md) supersedes older placeholder/activation notes above and explains the newly implemented workflows and outstanding environment validation.

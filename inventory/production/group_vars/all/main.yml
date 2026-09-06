@@ -447,3 +447,68 @@ postgresql_exporter_database: "postgres"
 haproxy_prometheus_enabled: true
 haproxy_prometheus_port: 8404
 haproxy_prometheus_path: "/metrics"
+
+# Managed subset applied to existing clusters; unrelated DCS keys are preserved.
+patroni_dynamic_configuration_enabled: true
+patroni_dynamic_configuration:
+  ttl: "{{ patroni_ttl }}"
+  loop_wait: "{{ patroni_loop_wait }}"
+  retry_timeout: "{{ patroni_retry_timeout }}"
+  maximum_lag_on_failover: "{{ patroni_maximum_lag_on_failover }}"
+  synchronous_mode: "{{ patroni_synchronous_mode | bool }}"
+  synchronous_mode_strict: "{{ patroni_synchronous_mode_strict | bool }}"
+  synchronous_node_count: "{{ patroni_synchronous_node_count }}"
+  postgresql:
+    use_pg_rewind: true
+    use_slots: true
+    parameters:
+      password_encryption: scram-sha-256
+      max_connections: "{{ postgresql_max_connections }}"
+      shared_buffers: "{{ postgresql_shared_buffers }}"
+      effective_cache_size: "{{ postgresql_effective_cache_size }}"
+      maintenance_work_mem: "{{ postgresql_maintenance_work_mem }}"
+      work_mem: "{{ postgresql_work_mem }}"
+      wal_level: replica
+      wal_compression: 'on'
+      wal_keep_size: "{{ postgresql_wal_keep_size }}"
+      max_wal_size: "{{ postgresql_max_wal_size }}"
+      min_wal_size: "{{ postgresql_min_wal_size }}"
+      max_wal_senders: 10
+      max_replication_slots: 10
+      hot_standby: 'on'
+      max_worker_processes: 8
+      max_parallel_workers: 8
+      max_parallel_workers_per_gather: 4
+      logging_collector: 'on'
+      log_directory: /var/log/postgresql
+      log_filename: postgresql-%Y-%m-%d_%H%M%S.log
+      log_rotation_age: 1d
+      log_rotation_size: 100MB
+      log_truncate_on_rotation: 'on'
+      log_line_prefix: '%m [%p] %q%u@%d '
+      log_checkpoints: 'on'
+      log_lock_waits: 'on'
+      log_temp_files: 10240
+      log_autovacuum_min_duration: 1000
+      log_min_duration_statement: "{{ postgresql_log_min_duration_statement_ms }}"
+
+# etcd metrics share the unauthenticated client API port. Enabling this gives
+# trusted monitoring hosts API access too. Default: DB-node access only.
+postgresql_etcd_metrics_network_access: false
+
+# pgBackRest supports this patch's explicit shared off-host NFS repository model.
+# Mount the SAME source on all nodes outside PGDATA before enabling management.
+postgresql_backup_repository_mount: ''
+postgresql_backup_repository_source: ''
+postgresql_backup_retention_full: 2
+postgresql_backup_retention_diff: 7
+postgresql_backup_process_max: 2
+postgresql_backup_schedule_enabled: false
+postgresql_backup_schedules:
+  - kind: full
+    calendar: 'Sun *-*-* 02:00:00 UTC'
+  - kind: diff
+    calendar: 'Mon..Sat *-*-* 02:00:00 UTC'
+postgresql_backup_max_age_hours: 30
+# Supply vault_pgbackrest_repository_password in encrypted Vault when enabled.
+# Preserve this key off-host too; losing it makes encrypted backups unrecoverable.

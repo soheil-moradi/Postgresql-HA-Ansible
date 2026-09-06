@@ -41,6 +41,15 @@
     name: "{{ server_timezone }}"
   when: manage_timezone | bool
 
+- name: Create systemd-timesyncd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/timesyncd.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: manage_timesyncd | bool
+
 - name: Configure systemd-timesyncd for internal NTP
   ansible.builtin.template:
     src: timesyncd.conf.j2

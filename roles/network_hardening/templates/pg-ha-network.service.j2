@@ -1,0 +1,12 @@
+[Unit]
+Description=PostgreSQL HA managed-port firewall
+Before=patroni.service etcd.service haproxy.service keepalived.service
+After=local-fs.target nftables.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/pg-ha-network.nft
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

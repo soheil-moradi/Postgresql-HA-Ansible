@@ -78,3 +78,7 @@ Only move Patroni PostgreSQL connection `sslmode` toward `verify-full` after eve
 ## Enforce TLS-only HBA
 
 `postgresql_tls_require_ssl` is reserved for the later HBA enforcement stage. Enforce `hostssl` only after encrypted application and replication traffic has been proven.
+
+## Updated implementation
+
+The [production patch guide](production-fixes.md) supersedes older placeholder/activation notes above and explains the newly implemented workflows and outstanding environment validation.

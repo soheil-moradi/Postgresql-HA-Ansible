@@ -173,8 +173,9 @@
       ansible.builtin.debug:
         var: patroni_pre_lb_topology
 
-- name: Install HAProxy and Keepalived on all three database nodes
+- name: Install HAProxy and Keepalived one database node at a time
   hosts: postgresql_cluster
+  serial: 1
   become: true
   gather_facts: true
   any_errors_fatal: true

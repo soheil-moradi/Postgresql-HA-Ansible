@@ -1,0 +1,115 @@
+---
+- name: Validate all backup inputs and shared mounts before changes
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Skip disabled backup management
+      ansible.builtin.meta: end_play
+      when: not postgresql_backup_management_enabled | bool
+
+    - name: Require complete cluster and explicit repository inputs
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | sort == groups['postgresql_cluster'] | sort
+          - postgres_cluster_name is match('^[A-Za-z0-9_-]+$')
+          - postgresql_backup_repository_mount is match('^/[A-Za-z0-9_./-]+$')
+          - postgresql_backup_destination is match('^/[A-Za-z0-9_./-]+$')
+          - postgresql_backup_repository_source | length > 0
+          - postgresql_backup_retention_full | int >= 2
+          - postgresql_backup_retention_diff | int >= 1
+          - postgresql_backup_process_max | int >= 1
+          - postgresql_backup_schedules | map(attribute='kind') | sort == ['diff', 'full']
+          - (vault_pgbackrest_repository_password | default('')) is match('^[A-Za-z0-9_+/=-]{32,}$')
+        fail_msg: "Configure a shared off-host NFS repository, retention and a 32+ character repository encryption secret in Vault."
+      no_log: true
+
+    - name: Verify the existing mount identity on every node
+      ansible.builtin.command:
+        argv: [findmnt, --json, --mountpoint, "{{ postgresql_backup_repository_mount }}", -o, 'TARGET,SOURCE,FSTYPE']
+      register: backup_mount
+      changed_when: false
+
+    - name: Require the reviewed off-host repository on every node
+      ansible.builtin.assert:
+        that:
+          - (backup_mount.stdout | from_json).filesystems | length == 1
+          - (backup_mount.stdout | from_json).filesystems[0].fstype in ['nfs', 'nfs4']
+          - (backup_mount.stdout | from_json).filesystems[0].source == postgresql_backup_repository_source
+
+- name: Configure backup tooling on every node
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - ansible.builtin.meta: end_play
+      when: not postgresql_backup_management_enabled | bool
+  roles:
+    - postgresql_backup
+
+- name: Initialize the stanza on the current primary and prepare WAL archiving
+  hosts: postgresql_cluster[0]
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.meta: end_play
+      when: not postgresql_backup_management_enabled | bool
+
+    - name: Discover the current primary
+      ansible.builtin.command:
+        argv: [patronictl, -c, /etc/patroni/patroni.yml, list, --format, json]
+      register: backup_topology
+      changed_when: false
+
+    - name: Resolve leader names
+      ansible.builtin.set_fact:
+        backup_leaders: "{{ backup_topology.stdout | from_json | selectattr('Role', 'equalto', 'Leader') | map(attribute='Member') | list }}"
+
+    - name: Require exactly one inventory leader
+      ansible.builtin.assert:
+        that:
+          - backup_leaders | length == 1
+          - backup_leaders[0] in groups['postgresql_cluster']
+
+    - name: Initialize encrypted backup stanza on primary
+      become_user: postgres
+      delegate_to: "{{ backup_leaders[0] }}"
+      ansible.builtin.command:
+        argv: [pgbackrest, "--stanza={{ postgres_cluster_name }}", stanza-create]
+      changed_when: false
+
+    - name: Prepare guarded WAL archiving without automatic restart
+      patroni_dynamic_config:
+        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}"
+        username: "{{ patroni_rest_username }}"
+        password: "{{ vault_patroni_rest_password }}"
+        desired:
+          postgresql:
+            parameters:
+              archive_mode: 'on'
+              archive_command: '/usr/local/sbin/pg-ha-backup archive-push "%p"'
+              archive_timeout: "{{ postgresql_backup_archive_timeout }}"
+
+- name: Enable reviewed schedules only after configuration is complete
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.meta: end_play
+      when: not postgresql_backup_management_enabled | bool
+
+    - name: Enable or explicitly stop backup timers
+      ansible.builtin.systemd_service:
+        name: "pg-ha-backup-{{ item.kind }}.timer"
+        enabled: "{{ postgresql_backup_schedule_enabled | bool }}"
+        state: "{{ 'started' if postgresql_backup_schedule_enabled | bool else 'stopped' }}"
+        daemon_reload: true
+      loop: "{{ postgresql_backup_schedules }}"
+
+    - name: Report remaining activation step
+      ansible.builtin.debug:
+        msg: "If archive_mode is pending restart, complete the documented rolling restart. Then run verify-backups.yml to prove WAL archiving and a completed base backup."

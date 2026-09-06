@@ -1,0 +1,36 @@
+---
+# Dynamic parameters are applied without automatically restarting PostgreSQL.
+- name: Converge managed settings on an existing Patroni cluster
+  hosts: postgresql_cluster[0]
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Validate Patroni timing and synchronous replication choices
+      ansible.builtin.assert:
+        that:
+          - patroni_ttl | int >= (patroni_loop_wait | int) + 2 * (patroni_retry_timeout | int)
+          - patroni_synchronous_node_count | int >= 1
+          - patroni_synchronous_node_count | int <= (groups['postgresql_cluster'] | length) - 1
+          - not (patroni_synchronous_mode_strict | bool) or patroni_synchronous_mode | bool
+      when: patroni_dynamic_configuration_enabled | bool
+
+    - name: Apply only the managed DCS subset and verify readback
+      patroni_dynamic_config:
+        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}"
+        username: "{{ patroni_rest_username }}"
+        password: "{{ vault_patroni_rest_password }}"
+        desired: "{{ patroni_dynamic_configuration }}"
+      when: patroni_dynamic_configuration_enabled | bool
+
+    - name: Read all members for pending restart review
+      ansible.builtin.command:
+        argv: [patronictl, -c, /etc/patroni/patroni.yml, list, "{{ postgres_cluster_name }}", --format, json]
+      register: dynamic_config_topology
+      changed_when: false
+
+    - name: Report pending restarts without disrupting active sessions
+      ansible.builtin.debug:
+        msg:
+          topology: "{{ dynamic_config_topology.stdout | from_json }}"
+          note: "Settings requiring restart remain pending. Use docs/production-fixes.md for the rolling procedure."

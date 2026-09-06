@@ -1,0 +1,33 @@
+---
+- import_playbook: validate.yml
+
+- name: Test a committed VIP transaction and visibility on both replicas
+  hosts: postgresql_cluster[0]
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Read current Patroni topology
+      ansible.builtin.command:
+        argv: [patronictl, -c, /etc/patroni/patroni.yml, list, --format, json]
+      register: write_probe_topology
+      changed_when: false
+
+    - name: Resolve replica endpoints
+      ansible.builtin.set_fact:
+        write_probe_replicas: "{{ write_probe_topology.stdout | from_json | rejectattr('Role', 'equalto', 'Leader') | map(attribute='Member') | list }}"
+
+    - name: Require two known replica members
+      ansible.builtin.assert:
+        that:
+          - write_probe_replicas | length == 2
+          - write_probe_replicas | difference(groups['postgresql_cluster']) | length == 0
+
+    - name: Commit marker via VIP, read replicas, and clean up the isolated schema
+      postgresql_write_probe:
+        vip: "{{ postgres_cluster_vip }}"
+        port: "{{ haproxy_postgresql_port }}"
+        node_port: "{{ postgresql_port }}"
+        replicas: "{{ write_probe_replicas | map('extract', hostvars, 'ansible_host') | list }}"
+        username: "{{ patroni_superuser_username }}"
+        password: "{{ vault_postgres_superuser_password }}"

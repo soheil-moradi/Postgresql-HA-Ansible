@@ -2,7 +2,8 @@
 Description=Patroni PostgreSQL High Availability Manager
 After=network-online.target etcd.service
 Wants=network-online.target
-Requires=etcd.service
+# Patroni can use any healthy etcd member; local etcd maintenance must not stop it.
+Wants=etcd.service
 
 [Service]
 Type=simple

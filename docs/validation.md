@@ -45,7 +45,7 @@ postgres_exporter  :9187/metrics
 ## Full safe readiness check
 
 ```bash
-./scripts/final-readiness-check.sh .
+bash scripts/final-readiness-check.sh . --ask-vault-pass -K
 ```
 
 This runs:
@@ -73,3 +73,5 @@ A non-zero `changed` count is not automatically an error, but it should have an 
 - a generated file being rewritten by another system.
 
 Investigate repeated changes before calling a role idempotent.
+
+See [production fixes and current validation limits](production-fixes.md) for this revision.

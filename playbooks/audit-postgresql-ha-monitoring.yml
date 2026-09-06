@@ -10,7 +10,7 @@
   tasks:
     - name: Verify Patroni metrics
       ansible.builtin.uri:
-        url: "http://{{ ansible_host }}:8008/metrics"
+        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}/metrics"
         return_content: true
         status_code: 200
       register: audit_patroni_metrics
@@ -18,7 +18,7 @@
 
     - name: Verify etcd metrics
       ansible.builtin.uri:
-        url: "http://{{ ansible_host }}:2379/metrics"
+        url: "http://{{ ansible_host }}:{{ etcd_client_port }}/metrics"
         return_content: true
         status_code: 200
       register: audit_etcd_metrics
@@ -46,8 +46,8 @@
       ansible.builtin.debug:
         msg:
           node: "{{ inventory_hostname }}"
-          patroni: "http://{{ ansible_host }}:8008/metrics"
-          etcd: "http://{{ ansible_host }}:2379/metrics"
+          patroni: "http://{{ ansible_host }}:{{ patroni_rest_port }}/metrics"
+          etcd: "http://{{ ansible_host }}:{{ etcd_client_port }}/metrics"
           postgres_exporter: >-
             {{
               ('http://' ~ ansible_host ~ ':' ~ postgresql_exporter_port|string ~ postgresql_exporter_path)

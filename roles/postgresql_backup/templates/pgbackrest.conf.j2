@@ -1,0 +1,21 @@
+# Managed only by the explicit configure-backups.yml workflow.
+[global]
+repo1-type=posix
+repo1-path={{ postgresql_backup_destination }}
+repo1-cipher-type=aes-256-cbc
+repo1-cipher-pass={{ vault_pgbackrest_repository_password }}
+repo1-retention-full={{ postgresql_backup_retention_full }}
+repo1-retention-diff={{ postgresql_backup_retention_diff }}
+process-max={{ postgresql_backup_process_max }}
+start-fast=y
+archive-async=n
+log-level-console=info
+log-level-file=info
+log-path=/var/log/pgbackrest
+lock-path=/var/lib/pgbackrest
+
+[{{ postgres_cluster_name }}]
+pg1-path={{ postgres_mount_point }}/{{ postgresql_version }}/patroni
+pg1-port={{ postgresql_port }}
+pg1-socket-path=/var/run/postgresql
+pg1-user=postgres

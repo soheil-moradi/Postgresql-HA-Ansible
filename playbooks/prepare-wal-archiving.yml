@@ -1,58 +1,32 @@
 ---
-# Disabled by default. Writes desired WAL archive settings to Patroni DCS only.
-# It intentionally does not restart PostgreSQL.
-
-- name: Prepare Patroni WAL archive configuration
+# For an existing externally managed archive tool. For managed pgBackRest use
+# configure-backups.yml; never run both workflows with conflicting commands.
+- name: Prepare external WAL archive configuration without automatic restart
   hosts: postgresql_cluster[0]
   become: true
   gather_facts: false
-
+  any_errors_fatal: true
   tasks:
-    - name: Explain why WAL archiving management is disabled
-      ansible.builtin.debug:
-        msg: "WAL archive management is disabled; no DCS setting is changed."
+    - name: Skip disabled WAL archive management
+      ansible.builtin.meta: end_play
       when: not postgresql_backup_management_enabled | bool
 
-    - name: Validate WAL archive inputs
+    - name: Require explicit external archive command and destination
       ansible.builtin.assert:
         that:
           - postgresql_backup_archive_command | length > 0
           - postgresql_backup_destination | length > 0
-        fail_msg: "archive_command and backup destination must be configured."
-      when: postgresql_backup_management_enabled | bool
 
-    - name: Render desired WAL archive fragment
-      ansible.builtin.copy:
-        dest: /etc/patroni/dynamic-wal-archive.yml
-        owner: root
-        group: postgres
-        mode: "0640"
-        content: |
+    - name: Converge external archive settings without touching unrelated DCS keys
+      patroni_dynamic_config:
+        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}"
+        username: "{{ patroni_rest_username }}"
+        password: "{{ vault_patroni_rest_password }}"
+        desired:
           postgresql:
             parameters:
               archive_mode: 'on'
-              archive_command: {{ postgresql_backup_archive_command | to_json }}
-              archive_timeout: '{{ postgresql_backup_archive_timeout }}'
-      when: postgresql_backup_management_enabled | bool
-
-    - name: Apply desired WAL archive parameters
-      ansible.builtin.command:
-        argv:
-          - patronictl
-          - -c
-          - /etc/patroni/patroni.yml
-          - edit-config
-          - "{{ postgres_cluster_name }}"
-          - --apply
-          - /etc/patroni/dynamic-wal-archive.yml
-          - --force
-      when: postgresql_backup_management_enabled | bool
-      changed_when: true
-
-    - name: Remove transient WAL archive fragment
-      ansible.builtin.file:
-        path: /etc/patroni/dynamic-wal-archive.yml
-        state: absent
-      when: postgresql_backup_management_enabled | bool
+              archive_command: "{{ postgresql_backup_archive_command }}"
+              archive_timeout: "{{ postgresql_backup_archive_timeout }}"
 
 - import_playbook: validate.yml

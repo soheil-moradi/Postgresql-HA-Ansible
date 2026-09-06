@@ -13,6 +13,7 @@
       ansible.builtin.assert:
         that:
           - item.name is match('^[A-Za-z_][A-Za-z0-9_]*$')
+          - (item.connection_limit | default(-1) | string) is match('^-?[0-9]+$')
           - not (item.login | default(false) | bool) or item.password is defined
           - not (item.login | default(false) | bool) or item.password_version is defined
           - not (item.login | default(false) | bool) or
@@ -64,6 +65,20 @@
           {{ (item.database | default('?')) ~ '/' ~
              (item.schema | default('?')) ~ ':' ~
              (item.level | default('?')) }}
+
+    - name: Initialize access profile keys
+      ansible.builtin.set_fact:
+        postgresql_access_profile_keys: []
+
+    - name: Collect access profile keys
+      ansible.builtin.set_fact:
+        postgresql_access_profile_keys: "{{ postgresql_access_profile_keys + [item.database ~ '/' ~ item.schema ~ '/' ~ item.role] }}"
+      loop: "{{ postgresql_managed_access_profiles }}"
+
+    - name: Reject ambiguous duplicate access profiles
+      ansible.builtin.assert:
+        that:
+          - postgresql_access_profile_keys | length == postgresql_access_profile_keys | unique | length
 
     - name: Read Patroni cluster topology
       ansible.builtin.command:

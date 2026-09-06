@@ -118,3 +118,7 @@ base backup failed
 last successful base backup too old
 restore/PITR test too old or never completed
 ```
+
+## Updated implementation
+
+The [production patch guide](production-fixes.md) supersedes older placeholder/activation notes above and explains the newly implemented workflows and outstanding environment validation.

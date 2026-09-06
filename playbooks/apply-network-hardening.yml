@@ -1,0 +1,11 @@
+---
+- name: Apply reviewed network restrictions one node at a time
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  roles:
+    - network_hardening
+
+- import_playbook: validate.yml

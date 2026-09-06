@@ -10,6 +10,19 @@
   changed_when: false
   register: storage_disk_signatures
 
+- name: Verify existing volume group belongs to the configured physical disk
+  ansible.builtin.command:
+    argv: [pvs, --noheadings, -o, vg_name, "{{ postgres_data_device }}"]
+  register: verified_disk_vg
+  changed_when: false
+  when: storage_existing_vg.rc == 0
+
+- name: Refuse an unrelated disk even when the expected VG exists elsewhere
+  ansible.builtin.assert:
+    that:
+      - verified_disk_vg.stdout | trim == postgres_vg_name
+  when: storage_existing_vg.rc == 0
+
 - name: Refuse to initialize a disk containing unknown signatures
   ansible.builtin.assert:
     that:
@@ -28,6 +41,12 @@
     state: present
   when: storage_existing_vg.rc != 0
 
+- name: Detect the existing PostgreSQL logical volume
+  ansible.builtin.stat:
+    path: "/dev/{{ postgres_vg_name }}/{{ postgres_lv_name }}"
+    follow: true
+  register: storage_existing_lv
+
 - name: Create PostgreSQL logical volume using available capacity
   community.general.lvol:
     vg: "{{ postgres_vg_name }}"
@@ -35,6 +54,7 @@
     size: 100%FREE
     shrink: false
     state: present
+  when: not storage_existing_lv.stat.exists
 
 - name: Assert the selected PostgreSQL filesystem is supported
   ansible.builtin.assert:

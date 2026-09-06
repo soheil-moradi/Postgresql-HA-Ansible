@@ -20,6 +20,7 @@
     owner: root
     group: root
     mode: "0600"
+    validate: "keepalived -t -f %s"
   no_log: true
   notify: Restart Keepalived
 
@@ -40,3 +41,24 @@
     port: "{{ haproxy_postgresql_port }}"
     timeout: 60
   run_once: true
+
+- name: Apply pending load balancer changes before advancing to the next node
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify both local endpoint services recovered
+  ansible.builtin.command: "systemctl is-active {{ item }}"
+  loop: [haproxy, keepalived]
+  register: endpoint_service_health
+  changed_when: false
+  retries: 10
+  delay: 2
+  until: endpoint_service_health.rc == 0
+
+- name: Verify the VIP still routes to PostgreSQL after this node
+  ansible.builtin.command:
+    argv: [pg_isready, -h, "{{ postgres_cluster_vip }}", -p, "{{ haproxy_postgresql_port | string }}", -t, '5']
+  register: rolling_vip_health
+  changed_when: false
+  retries: 20
+  delay: 2
+  until: rolling_vip_health.rc == 0

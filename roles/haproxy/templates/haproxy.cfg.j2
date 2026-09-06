@@ -55,7 +55,7 @@ frontend prometheus_metrics
     mode http
 
 {% if postgresql_monitoring_cidrs | default([]) | length > 0 %}
-    acl prometheus_allowed_source src {{ postgresql_monitoring_cidrs | join(' ') }}
+    acl prometheus_allowed_source src {{ (postgresql_monitoring_cidrs + (groups['postgresql_cluster'] | map('extract', hostvars, 'ansible_host') | list)) | join(' ') }}
     http-request deny unless prometheus_allowed_source
 {% endif %}
 

@@ -15,12 +15,21 @@
       - postgres_data_device is defined
       - postgres_cluster_vip is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
       - postgres_cluster_dns_name | length > 0
-      - postgres_client_cidrs | length > 0
+      - postgresql_hba_additional_rules is sequence
+      - postgresql_hba_additional_rules is not string
     fail_msg: "Complete hosts.yml and group_vars/all/main.yml before deployment."
 
 - name: Assert secret variables were loaded from Ansible Vault
   ansible.builtin.assert:
     that:
+      - vault_postgres_superuser_password is string
+      - vault_postgres_replication_password is string
+      - vault_postgres_rewind_password is string
+      - vault_patroni_rest_password is string
+      - vault_postgres_superuser_password | length > 0
+      - vault_postgres_replication_password | length > 0
+      - vault_postgres_rewind_password | length > 0
+      - vault_patroni_rest_password | length > 0
       - vault_postgres_superuser_password is defined
       - vault_postgres_replication_password is defined
       - vault_postgres_rewind_password is defined
@@ -93,7 +102,8 @@
 
 - name: Record whether this node currently owns the PostgreSQL VIP
   ansible.builtin.set_fact:
-    preflight_vip_is_local: "{{ postgres_cluster_vip in local_ipv4_addresses.stdout }}"
+    preflight_vip_is_local: >-
+      {{ (local_ipv4_addresses.stdout_lines | select('search', ' inet ' ~ (postgres_cluster_vip | regex_escape) ~ '/') | list | length) > 0 }}
 
 - name: Check Keepalived service state without changing it
   ansible.builtin.command: "systemctl is-active keepalived"
@@ -252,6 +262,7 @@
 - name: Verify the PostgreSQL data device exists
   ansible.builtin.stat:
     path: "{{ postgres_data_device }}"
+    follow: true
   register: postgres_data_device_stat
 
 - name: Assert PostgreSQL data device is a block device
@@ -308,6 +319,19 @@
       rc: 1
       stdout: ""
   when: preflight_vgs_command.rc != 0
+
+- name: Verify existing volume group belongs to the configured physical disk
+  ansible.builtin.command:
+    argv: [pvs, --noheadings, -o, vg_name, "{{ postgres_data_device }}"]
+  register: verified_disk_vg
+  changed_when: false
+  when: existing_postgres_vg.rc == 0
+
+- name: Refuse an unrelated disk even when the expected VG exists elsewhere
+  ansible.builtin.assert:
+    that:
+      - verified_disk_vg.stdout | trim == postgres_vg_name
+  when: existing_postgres_vg.rc == 0
 
 - name: Refuse a non-empty unrecognized disk
   ansible.builtin.assert:

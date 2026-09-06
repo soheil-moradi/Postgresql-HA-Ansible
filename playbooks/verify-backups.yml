@@ -1,0 +1,34 @@
+---
+# Runs a real WAL archive check. Does not start a full backup or perform restore.
+- name: Verify actual WAL archive and completed backup freshness
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Require backup integration is configured
+      ansible.builtin.assert:
+        that: [postgresql_backup_management_enabled | bool]
+
+    - name: Verify the repository on every node
+      become_user: postgres
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/pg-ha-backup, verify]
+      changed_when: false
+
+    - name: Exercise WAL archiving on current primary
+      become_user: postgres
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/pg-ha-backup, check]
+      changed_when: false
+
+    - name: Read backup catalog and check freshness
+      become_user: postgres
+      ansible.builtin.shell: |
+        set -euo pipefail
+        pgbackrest --stanza={{ postgres_cluster_name | quote }} --output=json info |
+        python3 -c 'import json,sys,time; d=json.load(sys.stdin); matches=[s for s in d if s.get("name")==sys.argv[1]]; assert len(matches)==1, "Missing stanza"; s=matches[0]; assert s.get("status",{}).get("code")==0, "Repository not healthy"; b=s.get("backup",[]); assert b, "No completed base backup"; age=time.time()-max(x["timestamp"]["stop"] for x in b); assert 0<=age<=float(sys.argv[2])*3600, "Backup is stale or future dated"; print("Newest completed backup age: %.2f hours" % (age/3600))' \
+          {{ postgres_cluster_name | quote }} {{ postgresql_backup_max_age_hours | int }}
+      args:
+        executable: /bin/bash
+      changed_when: false

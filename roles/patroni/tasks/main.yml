@@ -77,6 +77,9 @@
     group: postgres
     mode: "0750"
 
+- name: Validate requested internal TLS before rendering configuration
+  ansible.builtin.import_tasks: validate_internal_tls.yml
+
 - name: Render Patroni and PostgreSQL cluster configuration
   ansible.builtin.template:
     src: patroni.yml.j2
@@ -84,6 +87,8 @@
     owner: postgres
     group: postgres
     mode: "0600"
+    validate: >-
+      python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' %s
   no_log: true
   notify: Reload Patroni if running
 

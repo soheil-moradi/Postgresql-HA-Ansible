@@ -1,29 +1,30 @@
-name: Ansible Syntax & Quality Check
-
-on:
-  push:
-    branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
-
+name: Ansible and PostgreSQL regression checks
+on: [push, pull_request]
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-
+  checks:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: disposable-ci-password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-
-    - name: Install Ansible & Lint tools
-      run: |
-        python -m pip install --upgrade pip
-        pip install ansible ansible-lint
-
-    - name: Check Ansible Playbook Syntax
-      run: |
-        ansible-playbook site.yml --syntax-check
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: |
+          python -m pip install 'ansible-core>=2.19,<2.20' PyYAML
+          ansible-galaxy collection install -r requirements.yml
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+      - name: Run offline and real PostgreSQL privilege regression tests
+        env:
+          POSTGRES_TEST_DSN: postgresql://postgres:disposable-ci-password@127.0.0.1:5432/postgres
+        run: python -m unittest discover -s tests -v
+      - name: Syntax-check every entry point
+        run: ansible-playbook site.yml playbooks/*.yml --syntax-check

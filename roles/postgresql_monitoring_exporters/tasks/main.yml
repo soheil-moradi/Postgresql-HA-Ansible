@@ -9,7 +9,7 @@
 
 - name: Verify local PostgreSQL Unix socket exists
   ansible.builtin.stat:
-    path: /var/run/postgresql/.s.PGSQL.5432
+    path: /var/run/postgresql/.s.PGSQL.{{ postgresql_port }}
   register: postgresql_exporter_socket
 
 - name: Assert PostgreSQL local socket is available
@@ -66,6 +66,8 @@
       - -qAt
       - -h
       - /var/run/postgresql
+      - -p
+      - "{{ postgresql_port | string }}"
       - -d
       - "{{ postgresql_exporter_database }}"
       - -U

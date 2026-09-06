@@ -1,25 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 PROJECT_DIR="${1:-.}"
+if (( $# > 0 )); then shift; fi
 cd "$PROJECT_DIR"
 INV="inventory/production/hosts.yml"
-
-echo "== 1/3: duplicate YAML keys =="
+ANSIBLE_FLAGS=("$@")
+# A configured vault password file avoids interactive prompts. Otherwise the
+# caller can pass --ask-vault-pass and -K explicitly.
 python3 scripts/project-self-check.py .
-
-echo
-echo "== 2/3: syntax-check all playbooks =="
-while IFS= read -r pb; do
-  printf '%-65s' "$pb"
-  ansible-playbook -i "$INV" "$pb" --syntax-check >/dev/null
-  echo " OK"
-done < <(find playbooks -maxdepth 1 -type f -name '*.yml' | sort)
-
-echo
-echo "== 3/3: all safe production audits + HA validation =="
-ansible-playbook \
-  -i "$INV" \
-  playbooks/finalize-production-readiness.yml \
-  --ask-vault-pass \
-  -K
+python3 -m unittest discover -s tests -v
+mapfile -t PLAYBOOKS < <(find playbooks -maxdepth 1 -type f -name '*.yml' | sort)
+ansible-playbook -i "$INV" site.yml "${PLAYBOOKS[@]}" --syntax-check "${ANSIBLE_FLAGS[@]}"
+ansible-playbook -i "$INV" playbooks/finalize-production-readiness.yml "${ANSIBLE_FLAGS[@]}"

@@ -5,8 +5,9 @@
 
 - name: Reload Patroni if running
   ansible.builtin.shell: |
+    set -euo pipefail
     if systemctl is-active --quiet patroni.service; then
-      patronictl -c /etc/patroni/patroni.yml reload "{{ postgres_cluster_name }}" --force
+      systemctl reload patroni.service
       echo reloaded
     else
       echo inactive
@@ -15,4 +16,3 @@
     executable: /bin/bash
   register: patroni_reload_handler
   changed_when: "'reloaded' in patroni_reload_handler.stdout"
-  failed_when: false

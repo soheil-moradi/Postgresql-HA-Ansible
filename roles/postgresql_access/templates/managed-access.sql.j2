@@ -197,9 +197,11 @@ $ansible$;
 {% for access in postgresql_managed_access_profiles %}
 -- Access: {{ access.database }}/{{ access.schema }} -> {{ access.role }} ({{ access.level }})
 \connect "{{ access.database }}"
+BEGIN;
 
 DO $ansible$
 DECLARE
+    excess_write boolean := false;
     missing_db boolean;
     missing_schema boolean;
     missing_tables boolean;
@@ -220,6 +222,21 @@ BEGIN
     ) INTO missing_schema;
 
 {% if access.level == 'readonly' %}
+    SELECT EXISTS (
+        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = '{{ access.schema }}'
+          AND ((c.relkind IN ('r','p','v','m','f') AND
+                has_table_privilege('{{ access.role }}', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
+               OR (c.relkind = 'S' AND has_sequence_privilege('{{ access.role }}', c.oid, 'USAGE,UPDATE')))
+    ) OR has_schema_privilege('{{ access.role }}', '{{ access.schema }}', 'CREATE')
+      OR EXISTS (
+        SELECT 1 FROM pg_default_acl d
+        CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+        WHERE d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.owner }}')
+          AND d.defaclnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{{ access.schema }}')
+          AND a.grantee = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.role }}')
+          AND a.privilege_type <> 'SELECT'
+      ) INTO excess_write;
     SELECT EXISTS (
         SELECT 1
         FROM pg_class c
@@ -322,7 +339,7 @@ BEGIN
     ) INTO missing_default_sequences;
 {% endif %}
 
-    IF missing_db OR missing_schema OR missing_tables OR missing_sequences
+    IF excess_write OR missing_db OR missing_schema OR missing_tables OR missing_sequences
        OR missing_default_tables OR missing_default_sequences THEN
         RAISE NOTICE 'ANSIBLE_MANAGED_CHANGE access-profile {{ access.database }}/{{ access.role }}';
     END IF;
@@ -333,6 +350,16 @@ GRANT CONNECT ON DATABASE "{{ access.database }}" TO "{{ access.role }}";
 GRANT USAGE ON SCHEMA "{{ access.schema }}" TO "{{ access.role }}";
 
 {% if access.level == 'readonly' %}
+-- Revoke only direct rights on this explicitly managed profile. Never dismantle
+-- unrelated group memberships or PUBLIC grants silently.
+REVOKE CREATE ON SCHEMA "{{ access.schema }}" FROM "{{ access.role }}";
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+ON ALL TABLES IN SCHEMA "{{ access.schema }}" FROM "{{ access.role }}";
+REVOKE USAGE, UPDATE ON ALL SEQUENCES IN SCHEMA "{{ access.schema }}" FROM "{{ access.role }}";
+ALTER DEFAULT PRIVILEGES FOR ROLE "{{ access.owner }}" IN SCHEMA "{{ access.schema }}"
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLES FROM "{{ access.role }}";
+ALTER DEFAULT PRIVILEGES FOR ROLE "{{ access.owner }}" IN SCHEMA "{{ access.schema }}"
+REVOKE USAGE, UPDATE ON SEQUENCES FROM "{{ access.role }}";
 GRANT SELECT ON ALL TABLES IN SCHEMA "{{ access.schema }}" TO "{{ access.role }}";
 GRANT SELECT ON ALL SEQUENCES IN SCHEMA "{{ access.schema }}" TO "{{ access.role }}";
 
@@ -361,5 +388,31 @@ IN SCHEMA "{{ access.schema }}"
 GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO "{{ access.role }}";
 {% endif %}
 
+{% if access.level == 'readonly' %}
+DO $readonly$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ access.role }}' AND (rolsuper OR rolcreaterole))
+       OR has_schema_privilege('{{ access.role }}', '{{ access.schema }}', 'CREATE')
+       OR EXISTS (
+          SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = '{{ access.schema }}'
+            AND ((c.relkind IN ('r','p','v','m','f') AND
+                  has_table_privilege('{{ access.role }}', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
+                 OR (c.relkind = 'S' AND has_sequence_privilege('{{ access.role }}', c.oid, 'USAGE,UPDATE')))
+       ) OR EXISTS (
+          SELECT 1 FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+          WHERE d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = '{{ access.owner }}')
+            AND (d.defaclnamespace = 0 OR d.defaclnamespace =
+                 (SELECT oid FROM pg_namespace WHERE nspname = '{{ access.schema }}'))
+            AND d.defaclobjtype IN ('r','S') AND a.privilege_type <> 'SELECT'
+            AND (a.grantee = 0 OR a.grantee IN
+                 (SELECT oid FROM pg_roles WHERE pg_has_role('{{ access.role }}', oid, 'USAGE')))
+       ) THEN
+        RAISE EXCEPTION 'Readonly profile {{ access.role }} still inherits write/owner/default privileges. Review memberships, PUBLIC and global defaults. Profile transaction rolled back.';
+    END IF;
+END
+$readonly$;
+{% endif %}
+COMMIT;
 \connect postgres
 {% endfor %}

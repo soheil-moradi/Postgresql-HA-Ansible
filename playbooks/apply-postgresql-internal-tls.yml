@@ -1,0 +1,44 @@
+---
+# Requires TLS already active on every node. Does not enforce hostssl.
+- name: Validate internal TLS policy across the entire cluster
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.import_tasks: ../roles/patroni/tasks/validate_internal_tls.yml
+
+- name: Roll out Patroni connection TLS policy one node at a time
+  hosts: postgresql_cluster
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: Render validated local Patroni configuration
+      ansible.builtin.template:
+        src: ../roles/patroni/templates/patroni.yml.j2
+        dest: /etc/patroni/patroni.yml
+        owner: postgres
+        group: postgres
+        mode: '0600'
+        validate: "python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' %s"
+      no_log: true
+      register: internal_tls_render
+
+    - name: Reload the local Patroni process after a configuration change
+      ansible.builtin.systemd_service:
+        name: patroni
+        state: reloaded
+      when: internal_tls_render.changed
+
+    - name: Verify local PostgreSQL remains healthy
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ patroni_rest_port }}/health"
+        status_code: 200
+      register: internal_tls_health
+      retries: 20
+      delay: 2
+      until: internal_tls_health.status == 200
+
+- import_playbook: validate.yml

@@ -1,5 +1,12 @@
 # PostgreSQL HA Ansible
 
+> **Production reliability patch:** read [the patch rollout guide](docs/production-fixes.md)
+> before running the changed automation. It documents the fixes, optional firewall
+> and pgBackRest workflows, real validation commands and tests not run in the
+> authoring environment. Existing reference HA test claims below do not constitute
+> new validation of this revision.
+
+
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791?logo=postgresql&logoColor=white)
 ![Ubuntu](https://img.shields.io/badge/Ubuntu-24.04_LTS-E95420?logo=ubuntu&logoColor=white)
 ![Ansible](https://img.shields.io/badge/Ansible-Automated-EE0000?logo=ansible&logoColor=white)
@@ -216,7 +223,7 @@ ansible-playbook \
 For the complete safe readiness audit:
 
 ```bash
-./scripts/final-readiness-check.sh .
+bash scripts/final-readiness-check.sh . --ask-vault-pass -K
 ```
 
 ## 🛡️ Safety model

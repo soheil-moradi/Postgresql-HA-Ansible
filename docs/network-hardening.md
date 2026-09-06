@@ -70,3 +70,7 @@ Do not guess Pod CIDRs. Determine what source address actually reaches the datab
 - do not flush unrelated nftables rulesets blindly.
 
 The current repository provides the audit/model foundation; final enforcement remains an environment-specific change.
+
+## Updated implementation
+
+The [production patch guide](production-fixes.md) supersedes older placeholder/activation notes above and explains the newly implemented workflows and outstanding environment validation.

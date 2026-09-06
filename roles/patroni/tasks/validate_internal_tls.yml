@@ -1,0 +1,32 @@
+---
+- name: Validate internal TLS policy
+  ansible.builtin.assert:
+    that:
+      - postgresql_tls_internal_sslmode in ['disable', 'prefer', 'require', 'verify-ca', 'verify-full']
+
+- name: Prove requested internal TLS policy against every database node before changing Patroni
+  ansible.builtin.command:
+    argv:
+      - psql
+      - -X
+      - -v
+      - ON_ERROR_STOP=1
+      - -At
+      - -c
+      - "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid();"
+  environment:
+    PGHOST: "{{ hostvars[item].ansible_host }}"
+    PGPORT: "{{ postgresql_port | string }}"
+    PGUSER: "{{ patroni_superuser_username }}"
+    PGPASSWORD: "{{ vault_postgres_superuser_password }}"
+    PGDATABASE: postgres
+    PGSSLMODE: "{{ postgresql_tls_internal_sslmode }}"
+    PGSSLROOTCERT: "{{ postgresql_tls_ca_file }}"
+    PGCONNECT_TIMEOUT: '5'
+    PGOPTIONS: '-c statement_timeout=10000'
+  loop: "{{ groups['postgresql_cluster'] }}"
+  register: internal_tls_probe
+  changed_when: false
+  failed_when: internal_tls_probe.rc != 0 or internal_tls_probe.stdout | trim != 't'
+  no_log: true
+  when: postgresql_tls_internal_sslmode not in ['prefer', 'disable']

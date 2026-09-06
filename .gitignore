@@ -19,3 +19,6 @@ __pycache__/
 .idea/
 .vscode/
 *.code-workspace
+
+__pycache__/
+*.py[cod]
