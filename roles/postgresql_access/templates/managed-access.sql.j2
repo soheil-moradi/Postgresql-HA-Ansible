@@ -225,9 +225,13 @@ BEGIN
     SELECT EXISTS (
         SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = '{{ access.schema }}'
-          AND ((c.relkind IN ('r','p','v','m','f') AND
-                has_table_privilege('{{ access.role }}', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
-               OR (c.relkind = 'S' AND has_sequence_privilege('{{ access.role }}', c.oid, 'USAGE,UPDATE')))
+          AND CASE
+                WHEN c.relkind IN ('r','p','v','m','f') THEN
+                    has_table_privilege('{{ access.role }}', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                WHEN c.relkind = 'S' THEN
+                    has_sequence_privilege('{{ access.role }}', c.oid, 'USAGE,UPDATE')
+                ELSE false
+              END
     ) OR has_schema_privilege('{{ access.role }}', '{{ access.schema }}', 'CREATE')
       OR EXISTS (
         SELECT 1 FROM pg_default_acl d
@@ -246,8 +250,11 @@ BEGIN
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = '{{ access.schema }}'
-          AND c.relkind IN ('r','p','v','m','f')
-          AND NOT has_table_privilege('{{ access.role }}', c.oid, 'SELECT')
+          AND CASE
+                WHEN c.relkind IN ('r','p','v','m','f') THEN
+                    NOT has_table_privilege('{{ access.role }}', c.oid, 'SELECT')
+                ELSE false
+              END
     ) INTO missing_tables;
 
     SELECT EXISTS (
@@ -255,8 +262,11 @@ BEGIN
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = '{{ access.schema }}'
-          AND c.relkind = 'S'
-          AND NOT has_sequence_privilege('{{ access.role }}', c.oid, 'SELECT')
+          AND CASE
+                WHEN c.relkind = 'S' THEN
+                    NOT has_sequence_privilege('{{ access.role }}', c.oid, 'SELECT')
+                ELSE false
+              END
     ) INTO missing_sequences;
 
     SELECT (
@@ -300,13 +310,14 @@ BEGIN
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = '{{ access.schema }}'
-          AND c.relkind IN ('r','p','v','m','f')
-          AND (
-              NOT has_table_privilege('{{ access.role }}', c.oid, 'SELECT')
-              OR NOT has_table_privilege('{{ access.role }}', c.oid, 'INSERT')
-              OR NOT has_table_privilege('{{ access.role }}', c.oid, 'UPDATE')
-              OR NOT has_table_privilege('{{ access.role }}', c.oid, 'DELETE')
-          )
+          AND CASE
+                WHEN c.relkind IN ('r','p','v','m','f') THEN
+                    NOT has_table_privilege('{{ access.role }}', c.oid, 'SELECT')
+                    OR NOT has_table_privilege('{{ access.role }}', c.oid, 'INSERT')
+                    OR NOT has_table_privilege('{{ access.role }}', c.oid, 'UPDATE')
+                    OR NOT has_table_privilege('{{ access.role }}', c.oid, 'DELETE')
+                ELSE false
+              END
     ) INTO missing_tables;
 
     SELECT EXISTS (
@@ -314,12 +325,13 @@ BEGIN
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = '{{ access.schema }}'
-          AND c.relkind = 'S'
-          AND (
-              NOT has_sequence_privilege('{{ access.role }}', c.oid, 'USAGE')
-              OR NOT has_sequence_privilege('{{ access.role }}', c.oid, 'SELECT')
-              OR NOT has_sequence_privilege('{{ access.role }}', c.oid, 'UPDATE')
-          )
+          AND CASE
+                WHEN c.relkind = 'S' THEN
+                    NOT has_sequence_privilege('{{ access.role }}', c.oid, 'USAGE')
+                    OR NOT has_sequence_privilege('{{ access.role }}', c.oid, 'SELECT')
+                    OR NOT has_sequence_privilege('{{ access.role }}', c.oid, 'UPDATE')
+                ELSE false
+              END
     ) INTO missing_sequences;
 
     SELECT (
@@ -416,9 +428,13 @@ BEGIN
        OR EXISTS (
           SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
           WHERE n.nspname = '{{ access.schema }}'
-            AND ((c.relkind IN ('r','p','v','m','f') AND
-                  has_table_privilege('{{ access.role }}', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
-                 OR (c.relkind = 'S' AND has_sequence_privilege('{{ access.role }}', c.oid, 'USAGE,UPDATE')))
+            AND CASE
+                  WHEN c.relkind IN ('r','p','v','m','f') THEN
+                      has_table_privilege('{{ access.role }}', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                  WHEN c.relkind = 'S' THEN
+                      has_sequence_privilege('{{ access.role }}', c.oid, 'USAGE,UPDATE')
+                  ELSE false
+                END
        ) OR EXISTS (
           SELECT 1 FROM pg_default_acl d
           CROSS JOIN LATERAL (
