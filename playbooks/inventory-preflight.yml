@@ -1,0 +1,113 @@
+---
+# Inventory-only validation. Runs on the Ansible controller, without SSH,
+# privilege escalation, host fact collection, or any managed-node changes.
+# This does NOT replace the on-host infrastructure/storage preflight.
+- name: Validate role-driven PostgreSQL platform inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    pg_nodes: "{{ groups.get('postgresql_nodes', []) }}"
+    etcd_nodes: "{{ groups.get('etcd_nodes', []) }}"
+    lb_nodes: "{{ groups.get('load_balancer_nodes', []) }}"
+    inventory_nodes: "{{ groups.get('all', []) }}"
+    rw_vip: "{{ hostvars[pg_nodes[0]].postgres_cluster_vip | default('') }}"
+    ro_vip: "{{ hostvars[pg_nodes[0]].postgres_read_vip | default('') }}"
+    rw_dns: "{{ hostvars[pg_nodes[0]].postgres_cluster_dns_name | default('') }}"
+    ro_dns: "{{ hostvars[pg_nodes[0]].postgres_read_dns_name | default('') }}"
+  tasks:
+    - name: Require supported initial deployment groups
+      ansible.builtin.assert:
+        that:
+          - pg_nodes | length >= 3
+          - etcd_nodes | length >= 3
+          - etcd_nodes | length % 2 == 1
+          - lb_nodes | length >= 1
+        fail_msg: >-
+          Initial HA deployment needs at least three PostgreSQL hosts,
+          an odd etcd quorum of at least three members, and at least one
+          load-balancer host. These counts are independent of total VMs.
+
+    - name: Require a management address on every inventory host
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].ansible_host is defined
+          - hostvars[item].ansible_host | string | trim | length > 0
+        fail_msg: "Host {{ item }} requires a nonempty ansible_host."
+      loop: "{{ inventory_nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Reject reuse of a management IP by different hosts
+      ansible.builtin.assert:
+        that:
+          - >-
+            (inventory_nodes | map('extract', hostvars, 'ansible_host') | list | unique | length)
+            == (inventory_nodes | length)
+        fail_msg: "Two distinct inventory hosts have the same ansible_host."
+
+    - name: Require PostgreSQL identity and a declared dedicated data device
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].node_fqdn is defined
+          - hostvars[item].node_fqdn | string | trim | length > 0
+          - hostvars[item].postgres_data_device is defined
+          - hostvars[item].postgres_data_device | string | trim | length > 0
+          - hostvars[item].postgres_data_device | string is match('^/dev/')
+        fail_msg: >-
+          PostgreSQL host {{ item }} requires node_fqdn and a dedicated
+          postgres_data_device. On-host checks must verify disk identity
+          before any partition, PV, or filesystem operation.
+      loop: "{{ pg_nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Require distinct Read and Write endpoints
+      ansible.builtin.assert:
+        that:
+          - rw_vip | string | trim | length > 0
+          - ro_vip | string | trim | length > 0
+          - rw_vip != ro_vip
+          - rw_dns | string | trim | length > 0
+          - ro_dns | string | trim | length > 0
+          - rw_dns != ro_dns
+          - rw_vip not in (inventory_nodes | map('extract', hostvars, 'ansible_host') | list)
+          - ro_vip not in (inventory_nodes | map('extract', hostvars, 'ansible_host') | list)
+        fail_msg: >-
+          Read and Write VIPs/DNS names must be separately declared. Neither
+          VIP may equal an ansible_host address. This is inventory validation;
+          network ownership and VRRP remain out of scope here.
+
+    - name: Require a valid priority for every load balancer
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].keepalived_priority is defined
+          - hostvars[item].keepalived_priority | int >= 1
+          - hostvars[item].keepalived_priority | int <= 254
+        fail_msg: "Load balancer {{ item }} needs keepalived_priority in 1..254."
+      loop: "{{ lb_nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Require distinct Keepalived priorities
+      ansible.builtin.assert:
+        that:
+          - >-
+            (lb_nodes | map('extract', hostvars, 'keepalived_priority') | list | unique | length)
+            == (lb_nodes | length)
+        fail_msg: "Keepalived priorities must be unique for this VIP group."
+
+    - name: Reject DR activation in initial-deployment phase
+      ansible.builtin.assert:
+        that:
+          - not (hostvars[pg_nodes[0]].postgresql_dr_enabled | default(false) | bool)
+        fail_msg: >-
+          DR is not implemented in this phase. Leave postgresql_dr_enabled
+          false; a future dedicated DR preflight will enforce site-two safety.
+
+    - name: Warn when load-balancing is a single point of failure
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: one load_balancer_nodes host is a single point of failure.
+          Initial inventory validation permits this, but it is not LB HA.
+      when: lb_nodes | length == 1

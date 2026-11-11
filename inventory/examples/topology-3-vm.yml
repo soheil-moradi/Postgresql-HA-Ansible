@@ -1,0 +1,42 @@
+---
+# Generic LAB example only. Not a production inventory.
+# Documentation-only addresses (RFC 5737) and domain names (RFC 6761).
+# Replace every placeholder in a PRIVATE inventory before a real deployment.
+all:
+  vars:
+    # Two different floating addresses; never resolve both names to the same IP.
+    postgres_cluster_vip: 192.0.2.100  # Existing project's RW VIP variable.
+    postgres_read_vip: 192.0.2.101
+    postgres_cluster_dns_name: pg-rw.db.example.invalid
+    postgres_read_dns_name: pg-ro.db.example.invalid
+    postgres_cluster_vip_prefix: 24
+    postgresql_dr_enabled: false
+    patroni_synchronous_mode: false  # First lab baseline: asynchronous.
+  children:
+    postgresql_nodes:
+      hosts:
+        pg01:
+          ansible_host: 192.0.2.11
+          node_fqdn: pg01.example.invalid
+          postgres_data_device: /dev/disk/by-id/wwn-0x5000000000000001
+        pg02:
+          ansible_host: 192.0.2.12
+          node_fqdn: pg02.example.invalid
+          postgres_data_device: /dev/disk/by-id/wwn-0x5000000000000002
+        pg03:
+          ansible_host: 192.0.2.13
+          node_fqdn: pg03.example.invalid
+          postgres_data_device: /dev/disk/by-id/wwn-0x5000000000000003
+
+    # A host may belong to multiple groups. This topology uses co-location.
+    etcd_nodes:
+      hosts:
+        pg01: {}
+        pg02: {}
+        pg03: {}
+
+    load_balancer_nodes:
+      hosts:
+        pg01: {keepalived_priority: 150}
+        pg02: {keepalived_priority: 140}
+        pg03: {keepalived_priority: 130}
