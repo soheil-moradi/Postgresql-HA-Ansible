@@ -22,6 +22,8 @@ jobs:
           ansible-galaxy collection install -r requirements.yml
           sudo apt-get update
           sudo apt-get install -y postgresql-client-16
+      - name: Validate generic three-node inventory (controller only)
+        run: ansible-playbook -i inventory/examples/topology-3-vm.yml playbooks/inventory-preflight.yml
       - name: Run offline and real PostgreSQL privilege regression tests
         env:
           POSTGRES_TEST_DSN: postgresql://postgres:disposable-ci-password@127.0.0.1:5432/postgres
