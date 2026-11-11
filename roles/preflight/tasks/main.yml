@@ -17,7 +17,7 @@
       - postgres_cluster_dns_name | length > 0
       - postgresql_hba_additional_rules is sequence
       - postgresql_hba_additional_rules is not string
-  fail_msg: "Complete hosts.yml and group_vars/all/main.yml before deployment."
+    fail_msg: "Complete hosts.yml and group_vars/all/main.yml before deployment."
 
 - name: Reject incomplete TLS activation plans before changing any node
   ansible.builtin.assert:
