@@ -1,0 +1,222 @@
+---
+# Read-only host-side gate. All destructive operations are in main.yml *after*
+# these checks have completed successfully.
+- name: Validate PostgreSQL storage configuration
+  ansible.builtin.assert:
+    that:
+      - postgres_data_device is defined
+      - postgres_data_device is string
+      - postgres_data_device is match('^/dev/')
+      - postgres_vg_name is match('^[a-zA-Z0-9_+.-]+$')
+      - postgres_lv_name is match('^[a-zA-Z0-9_+.-]+$')
+      - postgres_filesystem in ['xfs', 'ext4']
+      - postgres_mount_point in ['/var/lib/postgresql', '/pgdata']
+    fail_msg: "Invalid or unsafe PostgreSQL storage variables."
+
+- name: Confirm the dedicated data device exists
+  ansible.builtin.stat:
+    path: "{{ postgres_data_device }}"
+    follow: true
+  register: storage_device_stat
+
+- name: Require a block device (not a file or directory)
+  ansible.builtin.assert:
+    that:
+      - storage_device_stat.stat.exists
+      - storage_device_stat.stat.isblk | default(false)
+    fail_msg: "Configured PostgreSQL data device is not a block device."
+
+- name: Inspect the target device and all dependent devices without modifying them
+  ansible.builtin.command:
+    argv:
+      - lsblk
+      - --json
+      - --bytes
+      - --tree
+      - --output
+      - KNAME,TYPE,FSTYPE,MOUNTPOINTS
+      - "{{ postgres_data_device }}"
+  changed_when: false
+  register: storage_lsblk_raw
+
+- name: Parse the target device topology
+  ansible.builtin.set_fact:
+    storage_device_tree: "{{ (storage_lsblk_raw.stdout | from_json).blockdevices[0] }}"
+
+- name: Require a whole disk and no filesystem or mount on the parent device
+  ansible.builtin.assert:
+    that:
+      - storage_device_tree.type == 'disk'
+      - storage_device_tree.fstype in [none, 'LVM2_member']
+      - storage_device_tree.mountpoints | default([], true) | reject('equalto', none) | list | length == 0
+    fail_msg: >-
+      PostgreSQL data device must be a dedicated whole disk, not a partition,
+      mounted OS disk, filesystem, RAID member, or LVM mapper target.
+
+- name: Inspect disk signatures without erasing them
+  ansible.builtin.command:
+    argv: [wipefs, --no-act, "{{ postgres_data_device }}"]
+  changed_when: false
+  register: storage_disk_signatures
+
+- name: Locate the expected PostgreSQL volume group
+  ansible.builtin.command:
+    argv: [vgs, --noheadings, -o, vg_name, "{{ postgres_vg_name }}"]
+  changed_when: false
+  failed_when: false
+  register: storage_existing_vg
+
+- name: Classify the target disk as new or managed
+  ansible.builtin.set_fact:
+    storage_disk_is_managed: "{{ storage_existing_vg.rc == 0 }}"
+    storage_disk_children: "{{ storage_device_tree.children | default([], true) }}"
+
+- name: Reject unsafe or partially recognized uninitialized disks
+  ansible.builtin.assert:
+    that:
+      - storage_disk_children | length == 0
+      - storage_disk_signatures.stdout | trim | length == 0
+      - postgres_data_disk_allow_initialize | default(false) | bool
+    fail_msg: >-
+      Initialization requires an explicitly approved, truly empty whole disk
+      (no partitions, dependent devices, signatures or mounts).
+  when: not storage_disk_is_managed | bool
+
+- name: Verify the existing physical volume maps to the expected VG
+  ansible.builtin.command:
+    argv: [pvs, --noheadings, -o, vg_name, "{{ postgres_data_device }}"]
+  register: storage_existing_disk_vg
+  changed_when: false
+  when: storage_disk_is_managed | bool
+
+- name: Count physical volumes in the managed volume group
+  ansible.builtin.command:
+    argv: [vgs, --noheadings, -o, pv_count, "{{ postgres_vg_name }}"]
+  changed_when: false
+  register: storage_existing_pv_count
+  when: storage_disk_is_managed | bool
+
+- name: List volumes already present in the managed VG
+  ansible.builtin.command:
+    argv: [lvs, --noheadings, -o, lv_name, "{{ postgres_vg_name }}"]
+  changed_when: false
+  register: storage_existing_lvs
+  when: storage_disk_is_managed | bool
+
+- name: Resolve expected LV device identity
+  ansible.builtin.command:
+    argv: [readlink, -f, "/dev/{{ postgres_vg_name }}/{{ postgres_lv_name }}"]
+  changed_when: false
+  register: storage_expected_lv_realpath
+  when: storage_disk_is_managed | bool
+
+- name: Verify existing storage is exactly the managed single-LV topology
+  ansible.builtin.assert:
+    that:
+      - storage_existing_disk_vg.stdout | trim == postgres_vg_name
+      - storage_existing_pv_count.stdout | trim | int == 1
+      - storage_existing_lvs.stdout_lines | map('trim') | reject('equalto', '') | list == [postgres_lv_name]
+      - storage_disk_children | length == 1
+      - storage_disk_children[0].type == 'lvm'
+      - ('/dev/' ~ storage_disk_children[0].kname) == storage_expected_lv_realpath.stdout | trim
+      - storage_disk_children[0].mountpoints | default([], true) | reject('equalto', none) | list | difference([postgres_mount_point]) | length == 0
+      - storage_disk_signatures.stdout is search('LVM2_member')
+    fail_msg: >-
+      Existing storage is not the expected single PostgreSQL PV/VG/LV on the
+      declared disk; refusing to modify it or adopt unrelated LVM volumes.
+  when: storage_disk_is_managed | bool
+
+- name: Detect existing filesystem type without changing it
+  ansible.builtin.command:
+    argv:
+      - blkid
+      - -s
+      - TYPE
+      - -o
+      - value
+      - "/dev/{{ postgres_vg_name }}/{{ postgres_lv_name }}"
+  changed_when: false
+  register: storage_managed_fstype
+  failed_when: false
+  when: storage_disk_is_managed | bool
+
+- name: Refuse missing, unknown or incompatible existing filesystems
+  ansible.builtin.assert:
+    that:
+      - storage_managed_fstype.rc == 0
+      - storage_managed_fstype.stdout | trim == postgres_filesystem
+      - storage_disk_children[0].fstype == postgres_filesystem
+    fail_msg: >-
+      The managed logical volume must already contain the configured filesystem.
+      Filesystem creation/conversion on existing LVM storage is not automated.
+  when: storage_disk_is_managed | bool
+
+- name: Inspect mountpoint without following symbolic links
+  ansible.builtin.stat:
+    path: "{{ postgres_mount_point }}"
+    follow: false
+  register: storage_mountpoint_stat
+
+- name: Reject a mountpoint that is a file or symbolic link
+  ansible.builtin.assert:
+    that:
+      - not storage_mountpoint_stat.stat.exists or storage_mountpoint_stat.stat.isdir | default(false)
+      - not storage_mountpoint_stat.stat.islnk | default(false)
+    fail_msg: "PostgreSQL mountpoint must be a real directory, never a symlink."
+
+- name: Check whether PostgreSQL mountpoint is already mounted
+  ansible.builtin.command:
+    argv: [findmnt, --mountpoint, "{{ postgres_mount_point }}", --noheadings, --output, SOURCE]
+  changed_when: false
+  failed_when: false
+  register: storage_existing_mount
+
+- name: Resolve existing mount source when mounted
+  ansible.builtin.command:
+    argv: [readlink, -f, "{{ storage_existing_mount.stdout | trim }}"]
+  changed_when: false
+  register: storage_existing_mount_realpath
+  when: storage_existing_mount.rc == 0
+
+- name: Ensure an existing mount belongs to this PostgreSQL LV
+  ansible.builtin.assert:
+    that:
+      - storage_disk_is_managed | bool
+      - storage_existing_mount_realpath.stdout | trim == storage_expected_lv_realpath.stdout | trim
+    fail_msg: "The destination is already mounted from an unrelated block device."
+  when: storage_existing_mount.rc == 0
+
+- name: Inspect entries underneath an unmounted existing mountpoint
+  ansible.builtin.find:
+    paths: "{{ postgres_mount_point }}"
+    hidden: true
+    file_type: any
+    recurse: false
+  register: storage_unmounted_destination_entries
+  when:
+    - storage_existing_mount.rc != 0
+    - storage_mountpoint_stat.stat.exists
+
+- name: Refuse to hide pre-existing data under the mountpoint
+  ansible.builtin.assert:
+    that:
+      - storage_unmounted_destination_entries.matched | int == 0
+    fail_msg: >-
+      The destination directory contains files but is not mounted; mounting
+      here could hide existing OS-disk data. Investigate manually.
+  when:
+    - storage_existing_mount.rc != 0
+    - storage_mountpoint_stat.stat.exists
+
+- name: Inspect existing fstab mountpoint entry without changing it
+  ansible.builtin.command:
+    argv: [findmnt, --fstab, --mountpoint, "{{ postgres_mount_point }}", --noheadings, --output, SOURCE]
+  changed_when: false
+  failed_when: false
+  register: storage_fstab_source
+
+- name: Refuse to overwrite a pre-existing fstab entry for the mountpoint
+  ansible.builtin.assert:
+    that:
+      - storage_fstab_source.rc != 0 or storage_fstab_source.stdout | trim in ['/dev/' ~ postgres_vg_name ~ '/' ~ postgres_lv_name, '/dev/mapper/' ~ postgres_vg_name ~ '-' ~ postgres_lv_name]
+    fail_msg: "fstab already contains a different source for PostgreSQL mountpoint."
