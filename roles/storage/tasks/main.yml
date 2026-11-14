@@ -1,126 +1,43 @@
 ---
-- name: Detect target PostgreSQL volume group
-  ansible.builtin.command: "vgs --noheadings -o vg_name {{ postgres_vg_name }}"
-  changed_when: false
-  failed_when: false
-  register: storage_existing_vg
+# Every mutating operation is gated by read-only validation.
+- name: Validate PostgreSQL storage identity and destination
+  ansible.builtin.import_tasks: validate.yml
 
-- name: Re-check disk signatures before possible initialization
-  ansible.builtin.command: "wipefs --no-act {{ postgres_data_device }}"
-  changed_when: false
-  register: storage_disk_signatures
-
-- name: Verify existing volume group belongs to the configured physical disk
-  ansible.builtin.command:
-    argv: [pvs, --noheadings, -o, vg_name, "{{ postgres_data_device }}"]
-  register: verified_disk_vg
-  changed_when: false
-  when: storage_existing_vg.rc == 0
-
-- name: Refuse an unrelated disk even when the expected VG exists elsewhere
-  ansible.builtin.assert:
-    that:
-      - verified_disk_vg.stdout | trim == postgres_vg_name
-  when: storage_existing_vg.rc == 0
-
-- name: Refuse to initialize a disk containing unknown signatures
-  ansible.builtin.assert:
-    that:
-      - >-
-        storage_disk_signatures.stdout | trim | length == 0 or
-        storage_existing_vg.rc == 0
-      - >-
-        storage_existing_vg.rc == 0 or
-        postgres_data_disk_allow_initialize | bool
-    fail_msg: "Storage safety condition failed; no disk changes were made."
-
-- name: Create PostgreSQL volume group on the empty data disk
+- name: Initialize PostgreSQL volume group on the confirmed empty disk
   community.general.lvg:
     vg: "{{ postgres_vg_name }}"
     pvs: "{{ postgres_data_device }}"
+    remove_extra_pvs: false
     state: present
-  when: storage_existing_vg.rc != 0
+  when: not storage_disk_is_managed | bool
 
-- name: Detect the existing PostgreSQL logical volume
-  ansible.builtin.stat:
-    path: "/dev/{{ postgres_vg_name }}/{{ postgres_lv_name }}"
-    follow: true
-  register: storage_existing_lv
-
-- name: Create PostgreSQL logical volume using available capacity
+- name: Initialize PostgreSQL logical volume on the new VG
   community.general.lvol:
     vg: "{{ postgres_vg_name }}"
     lv: "{{ postgres_lv_name }}"
     size: 100%FREE
     shrink: false
     state: present
-  when: not storage_existing_lv.stat.exists
+  when: not storage_disk_is_managed | bool
 
-- name: Assert the selected PostgreSQL filesystem is supported
-  ansible.builtin.assert:
-    that:
-      - postgres_filesystem in ['ext4', 'xfs']
-    fail_msg: >-
-      Unsupported postgres_filesystem={{ postgres_filesystem }}. Use ext4 or xfs.
-
-- name: Detect an existing filesystem on the PostgreSQL logical volume
-  ansible.builtin.command:
-    argv:
-      - blkid
-      - -s
-      - TYPE
-      - -o
-      - value
-      - "/dev/{{ postgres_vg_name }}/{{ postgres_lv_name }}"
-  changed_when: false
-  failed_when: false
-  register: postgres_existing_filesystem
-
-- name: Refuse implicit conversion of an existing PostgreSQL filesystem
-  ansible.builtin.assert:
-    that:
-      - >-
-        postgres_existing_filesystem.stdout | trim | length == 0 or
-        postgres_existing_filesystem.stdout | trim == postgres_filesystem
-    fail_msg: >-
-      The logical volume already contains
-      {{ postgres_existing_filesystem.stdout | trim }}, but postgres_filesystem
-      is set to {{ postgres_filesystem }}. Changing filesystem type is a
-      destructive migration and is intentionally not automated.
-
-- name: Create ext4 filesystem with reserved blocks
+- name: Create filesystem only on the newly initialized logical volume
   community.general.filesystem:
     dev: "/dev/{{ postgres_vg_name }}/{{ postgres_lv_name }}"
-    fstype: ext4
-    opts: "-m {{ postgres_ext4_reserved_percent }}"
-  when: postgres_filesystem == 'ext4'
+    fstype: "{{ postgres_filesystem }}"
+    opts: "{{ '-m ' ~ postgres_ext4_reserved_percent if postgres_filesystem == 'ext4' else omit }}"
+    force: false
+  when: not storage_disk_is_managed | bool
 
-- name: Create XFS filesystem
-  community.general.filesystem:
-    dev: "/dev/{{ postgres_vg_name }}/{{ postgres_lv_name }}"
-    fstype: xfs
-  when: postgres_filesystem == 'xfs'
-
-- name: Detect whether the PostgreSQL filesystem is already mounted
-  ansible.builtin.command:
-    argv:
-      - findmnt
-      - --mountpoint
-      - "{{ postgres_mount_point }}"
-  changed_when: false
-  failed_when: false
-  register: postgres_mount_before
-
-- name: Create PostgreSQL mount point before the first mount
+- name: Create PostgreSQL mountpoint when absent
   ansible.builtin.file:
     path: "{{ postgres_mount_point }}"
     state: directory
     owner: root
     group: root
     mode: "0755"
-  when: postgres_mount_before.rc != 0
+  when: not storage_mountpoint_stat.stat.exists
 
-- name: Mount PostgreSQL filesystem and persist it in fstab
+- name: Mount verified PostgreSQL filesystem and persist it in fstab
   ansible.posix.mount:
     path: "{{ postgres_mount_point }}"
     src: "/dev/{{ postgres_vg_name }}/{{ postgres_lv_name }}"
@@ -128,6 +45,32 @@
     opts: "{{ postgres_mount_options }}"
     state: mounted
 
-- name: Verify PostgreSQL mount point is active
-  ansible.builtin.command: "findmnt --mountpoint {{ postgres_mount_point }}"
+- name: Verify the mountpoint after storage reconciliation
+  ansible.builtin.command:
+    argv: [findmnt, --mountpoint, "{{ postgres_mount_point }}", --noheadings, --output, SOURCE,FSTYPE]
   changed_when: false
+  register: storage_final_mount
+
+- name: Verify the expected filesystem type is mounted
+  ansible.builtin.assert:
+    that:
+      - (storage_final_mount.stdout | split() | last) == postgres_filesystem
+    fail_msg: "PostgreSQL filesystem was not mounted with the expected type."
+
+- name: Resolve mounted PostgreSQL source after reconciliation
+  ansible.builtin.command:
+    argv: [readlink, -f, "{{ (storage_final_mount.stdout | split())[0] }}"]
+  changed_when: false
+  register: storage_final_mount_source
+
+- name: Resolve expected PostgreSQL LV source after reconciliation
+  ansible.builtin.command:
+    argv: [readlink, -f, "/dev/{{ postgres_vg_name }}/{{ postgres_lv_name }}"]
+  changed_when: false
+  register: storage_final_lv_source
+
+- name: Assert the mounted source is the declared PostgreSQL LV
+  ansible.builtin.assert:
+    that:
+      - storage_final_mount_source.stdout | trim == storage_final_lv_source.stdout | trim
+    fail_msg: "PostgreSQL mount is backed by a different block device."
