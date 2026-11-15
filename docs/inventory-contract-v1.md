@@ -75,3 +75,13 @@ in the example intentionally do not route to real servers.
    second VIP, or PostgreSQL storage. Those require separate reviewed changes.
 3. It does **not** implement dynamic scale-out/in or data migration.
 4. GitHub Actions validates public code only, never accesses company servers.
+
+### Lab-only automatic storage discovery
+
+The `postgres_data_device` requirement is relaxed **only** when
+`postgres_storage_discovery_mode: auto` is explicitly enabled. Its default
+remains `explicit`, requiring a per-node `/dev/...` path. The private lab
+inventory may use auto mode without per-host paths; controller preflight only
+checks this opt-in. All actual device and OS-disk identity checks happen
+on the hosts, inside the Storage role. See
+[`storage-contract-v1.md`](storage-contract-v1.md) for fail-closed safeguards.

@@ -1,0 +1,45 @@
+---
+# Included both before and after reboot; never initializes or mounts storage.
+- name: Validate existing PostgreSQL storage identity without modification
+  ansible.builtin.include_role:
+    name: storage
+    tasks_from: validate
+    public: true
+
+- name: Require a mounted and fully recognized PostgreSQL data volume
+  ansible.builtin.assert:
+    that:
+      - storage_disk_is_managed | bool
+      - storage_existing_mount.rc == 0
+      - storage_existing_mount_realpath.stdout | trim == storage_expected_lv_realpath.stdout | trim
+    fail_msg: >-
+      Persistence testing requires an already managed and mounted PostgreSQL LV.
+      No disk initialization or mount repair is performed by this playbook.
+
+- name: Inspect the active PostgreSQL mount and filesystem type
+  ansible.builtin.command:
+    argv:
+      - findmnt
+      - --mountpoint
+      - "{{ postgres_mount_point }}"
+      - --noheadings
+      - --output
+      - "SOURCE,FSTYPE"
+  changed_when: false
+  register: storage_persistence_findmnt
+
+- name: Resolve the active mount source to its real device
+  ansible.builtin.command:
+    argv:
+      - readlink
+      - -f
+      - "{{ (storage_persistence_findmnt.stdout | split())[0] }}"
+  changed_when: false
+  register: storage_persistence_mount_source
+
+- name: Require the expected LV and filesystem to be mounted
+  ansible.builtin.assert:
+    that:
+      - (storage_persistence_findmnt.stdout | split() | last) == postgres_filesystem
+      - storage_persistence_mount_source.stdout | trim == storage_expected_lv_realpath.stdout | trim
+    fail_msg: "The PostgreSQL mount does not match its declared LV and filesystem."

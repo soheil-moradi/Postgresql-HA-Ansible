@@ -17,7 +17,13 @@ printf '\n== Unit and optional integration tests ==\n'
 python -m unittest discover -s tests -v
 
 printf '\n== All Ansible entry points: syntax ==\n'
-ansible-playbook site.yml playbooks/*.yml --syntax-check
+# The public inventory uses postgresql_nodes; legacy playbooks still expect
+# postgresql_cluster. The second, syntax-only inventory aliases the groups
+# without containing any company IP addresses or connecting to a host.
+ansible-playbook \
+  -i inventory/examples/topology-3-vm.yml \
+  -i inventory/examples/syntax-legacy-alias.ini \
+  site.yml playbooks/*.yml --syntax-check
 
 printf '\n== Git whitespace checks ==\n'
 git diff --check

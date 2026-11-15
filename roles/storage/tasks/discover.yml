@@ -1,0 +1,100 @@
+---
+- name: Require a supported PostgreSQL storage discovery mode
+  ansible.builtin.assert:
+    that:
+      - postgres_storage_discovery_mode in ['explicit', 'auto']
+    fail_msg: "Storage discovery mode must be explicit or auto."
+
+- name: Require an explicitly declared data disk in production mode
+  ansible.builtin.assert:
+    that:
+      - postgres_data_device is defined
+      - postgres_data_device is string
+      - postgres_data_device is match('^/dev/')
+    fail_msg: "Explicit storage requires postgres_data_device under /dev."
+  when: postgres_storage_discovery_mode == 'explicit'
+
+- name: Use explicitly declared PostgreSQL data disk
+  ansible.builtin.set_fact:
+    storage_selected_device: "{{ postgres_data_device }}"
+  when: postgres_storage_discovery_mode == 'explicit'
+
+- name: Inspect all local block devices and root filesystem ancestry
+  ansible.builtin.command:
+    argv:
+      - lsblk
+      - --json
+      - --bytes
+      - --tree
+      - --output
+      - KNAME,PATH,TYPE,FSTYPE,MOUNTPOINTS
+  changed_when: false
+  register: storage_discovery_lsblk
+  when: postgres_storage_discovery_mode == 'auto'
+
+- name: Select exactly one independent non-OS whole disk
+  ansible.builtin.set_fact:
+    storage_auto_disk_path: >-
+      {{ (storage_discovery_lsblk.stdout | from_json) | postgres_storage_select_auto_disk }}
+  when: postgres_storage_discovery_mode == 'auto'
+
+- name: Look up stable udev identifiers for the selected data disk
+  ansible.builtin.shell: |
+    set -eu
+    target="$(readlink -e -- {{ storage_auto_disk_path | quote }})"
+    for directory in /dev/disk/by-id /dev/disk/by-path; do
+      [ -d "$directory" ] || continue
+      for link in "$directory"/*; do
+        [ -L "$link" ] || continue
+        resolved="$(readlink -e -- "$link")" || continue
+        if [ "$resolved" = "$target" ]; then
+          printf '%s\n' "$link"
+        fi
+      done
+    done
+  args:
+    executable: /bin/sh
+  changed_when: false
+  register: storage_auto_aliases
+  when: postgres_storage_discovery_mode == 'auto'
+
+- name: Choose a stable identifier over a kernel enumeration name
+  ansible.builtin.set_fact:
+    storage_selected_device: >-
+      {{
+        ((storage_auto_aliases.stdout_lines | select('match', '^/dev/disk/by-id/wwn-') | sort | list)
+         + (storage_auto_aliases.stdout_lines | select('match', '^/dev/disk/by-id/') | sort | list)
+         + (storage_auto_aliases.stdout_lines | select('match', '^/dev/disk/by-path/') | sort | list))
+        | first | default('')
+      }}
+  when: postgres_storage_discovery_mode == 'auto'
+
+- name: Refuse automatic initialization without a persistent udev disk path
+  ansible.builtin.assert:
+    that:
+      - storage_selected_device | length > 0
+    fail_msg: >-
+      The only independent disk has no stable /dev/disk/by-id or by-path alias.
+      Configure a disk serial in Terraform or use explicit disk identity.
+  when: postgres_storage_discovery_mode == 'auto'
+
+- name: Resolve the auto-selected disk identifier to prevent alias mismatch
+  ansible.builtin.command:
+    argv: [readlink, -e, "{{ storage_selected_device }}"]
+  changed_when: false
+  register: storage_auto_resolved_device
+  when: postgres_storage_discovery_mode == 'auto'
+
+- name: Verify the auto-selected identifier still points to the discovered disk
+  ansible.builtin.assert:
+    that:
+      - storage_auto_resolved_device.stdout | trim == storage_auto_disk_path
+    fail_msg: "Selected data disk alias changed during discovery; refusing changes."
+  when: postgres_storage_discovery_mode == 'auto'
+
+- name: Report selected PostgreSQL data disk for operator review
+  ansible.builtin.debug:
+    msg:
+      - "Selection mode: {{ postgres_storage_discovery_mode }}"
+      - "Selected data device: {{ storage_selected_device }}"
+      - "Discovered kernel disk: {{ storage_auto_disk_path | default('explicit selection') }}"

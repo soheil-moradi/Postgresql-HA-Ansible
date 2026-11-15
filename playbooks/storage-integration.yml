@@ -1,0 +1,24 @@
+---
+# Explicit lab-only workflow. Default is read-only validation; initialization
+# requires -e postgres_storage_initialize=true. Never use on live data disks.
+- ansible.builtin.import_playbook: inventory-preflight.yml
+
+- name: Validate or initialize PostgreSQL storage on disposable test nodes
+  hosts: postgresql_nodes
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: Validate disk discovery and storage identity without changes
+      ansible.builtin.include_role:
+        name: storage
+        tasks_from: validate
+      when: not (postgres_storage_initialize | default(false) | bool)
+
+    - name: Initialize or reconcile PostgreSQL storage with explicit lab approval
+      ansible.builtin.include_role:
+        name: storage
+      vars:
+        postgres_data_disk_allow_initialize: true
+      when: postgres_storage_initialize | default(false) | bool

@@ -68,6 +68,16 @@ class InventoryContract(unittest.TestCase):
                 mutate(variant)
                 self._run_preflight(variant, expected_success=False)
 
+    @unittest.skipUnless(shutil.which('ansible-playbook'), 'ansible-playbook not installed')
+    def test_controller_preflight_accepts_opted_in_discovery_without_disk_paths(self):
+        variant = copy.deepcopy(self.inventory)
+        variant['all']['vars']['postgres_storage_discovery_mode'] = 'auto'
+        for host in variant['all']['children']['postgresql_nodes']['hosts'].values():
+            host.pop('postgres_data_device')
+        self._run_preflight(variant, expected_success=True)
+        variant['all']['vars']['postgres_storage_discovery_mode'] = 'unknown'
+        self._run_preflight(variant, expected_success=False)
+
     def _run_preflight(self, inventory, expected_success):
         with tempfile.TemporaryDirectory(prefix='pg-inventory-test-') as tmp:
             fixture = Path(tmp) / 'hosts.yml'
