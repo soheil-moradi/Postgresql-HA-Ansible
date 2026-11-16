@@ -1,4 +1,11 @@
 ---
+# Keep package candidates aligned with the configured APT repository before
+# installing PostgreSQL; stale indexes may reference removed .deb versions.
+- name: Refresh APT package indexes before Patroni package installation
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
 - name: Install postgresql-common before the server package
   ansible.builtin.apt:
     name: postgresql-common

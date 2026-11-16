@@ -14,3 +14,38 @@ postgresql_tls_min_protocol_version: TLSv1.2
 postgresql_tls_server_cert_file: /etc/postgresql/tls/server.crt
 postgresql_tls_server_key_file: /etc/postgresql/tls/server.key
 postgresql_tls_ca_file: /etc/postgresql/tls/ca.crt
+
+# Generic initial lab fallback values (inventory overrides these defaults).
+# Production group_vars may supply a larger tuned configuration.
+postgres_cluster_name: pg-lab
+patroni_namespace: /service/
+postgres_mount_point: /var/lib/postgresql
+postgresql_version: 16
+postgresql_port: 5432
+patroni_rest_port: 8008
+etcd_client_port: 2379
+patroni_superuser_username: postgres
+patroni_replication_username: replicator
+patroni_rewind_username: rewind_user
+patroni_rest_username: patroni_api
+postgresql_hba_additional_rules: []
+postgresql_tls_internal_sslmode: prefer
+patroni_synchronous_mode: false
+patroni_dynamic_configuration:
+  ttl: 30
+  loop_wait: 10
+  retry_timeout: 10
+  maximum_lag_on_failover: 67108864
+  synchronous_mode: "{{ patroni_synchronous_mode | bool }}"
+  synchronous_mode_strict: false
+  postgresql:
+    use_pg_rewind: true
+    use_slots: true
+    parameters:
+      password_encryption: scram-sha-256
+      wal_level: replica
+      hot_standby: 'on'
+      max_wal_senders: 10
+      max_replication_slots: 10
+      shared_buffers: 256MB
+      max_connections: 100

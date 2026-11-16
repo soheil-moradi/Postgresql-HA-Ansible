@@ -1,0 +1,312 @@
+---
+# Lab-only first PostgreSQL/Patroni bootstrap. Never run against production.
+# Mount and quorum are checked before any PostgreSQL package installation.
+- ansible.builtin.import_playbook: patroni-preflight-lab.yml
+
+- name: Require explicit approval and external passwords before changing hosts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Refuse unapproved PostgreSQL lab bootstrap
+      ansible.builtin.assert:
+        that:
+          - patroni_lab_bootstrap_approved | default(false) | bool
+          - (groups.get('postgresql_nodes', []) | length) == 3
+          - (groups.get('postgresql_nodes', []) | sort) == (groups.get('etcd_nodes', []) | sort)
+          - not (etcd_tls_enabled | default(false) | bool)
+          - not (patroni_rest_tls_enabled | default(false) | bool)
+          - not (postgresql_tls_activation_enabled | default(false) | bool)
+        fail_msg: >-
+          Explicit patroni_lab_bootstrap_approved=true and an isolated, colocated
+          three-node plaintext lab are required. Do not use for production.
+
+    - name: Require four distinct nonplaceholder secrets from private Vault
+      ansible.builtin.assert:
+        that:
+          - vault_postgres_superuser_password | default('') | string | length >= 20
+          - vault_postgres_replication_password | default('') | string | length >= 20
+          - vault_postgres_rewind_password | default('') | string | length >= 20
+          - vault_patroni_rest_password | default('') | string | length >= 20
+          - >-
+            ([vault_postgres_superuser_password, vault_postgres_replication_password,
+             vault_postgres_rewind_password, vault_patroni_rest_password]
+             | unique | length) == 4
+          - "'CHANGE_ME' not in (vault_postgres_superuser_password | string)"
+          - "'CHANGE_ME' not in (vault_postgres_replication_password | string)"
+          - "'CHANGE_ME' not in (vault_postgres_rewind_password | string)"
+          - "'CHANGE_ME' not in (vault_patroni_rest_password | string)"
+        fail_msg: >-
+          Provide four distinct strong passwords via an encrypted external
+          Ansible Vault file. No password may appear in Git or CLI arguments.
+      no_log: true
+
+- name: Refuse foreign or partially initialized PostgreSQL data before installation
+  hosts: postgresql_nodes
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    lab_pg_mount: "{{ postgres_mount_point | default('/var/lib/postgresql') }}"
+    lab_pg_version: "{{ postgresql_version | default(16) }}"
+    lab_pg_scope: "{{ postgres_cluster_name | default('pg-lab') }}"
+    lab_pg_data: "{{ lab_pg_mount }}/{{ lab_pg_version }}/patroni"
+    lab_pg_owner_marker: /etc/patroni/.lab-bootstrap-owner
+    lab_pg_expected_owner: "{{ lab_pg_scope }}|{{ inventory_hostname }}|{{ ansible_host }}|{{ lab_pg_version }}"
+  tasks:
+    - name: Reject partial targeting or bypassed approval before touching nodes
+      ansible.builtin.assert:
+        that:
+          - (ansible_play_hosts_all | sort) == (groups['postgresql_nodes'] | sort)
+          - patroni_lab_bootstrap_approved | default(false) | bool
+          - (postgresql_version | default(16) | int) == 16
+        fail_msg: >-
+          All three lab database hosts and PostgreSQL 16 must be targeted.
+          No --limit or partial bootstrap is supported.
+
+    - name: Inspect Patroni-managed data directory
+      ansible.builtin.stat:
+        path: "{{ lab_pg_data }}"
+      register: lab_existing_data
+
+    - name: Inspect Patroni PG_VERSION
+      ansible.builtin.stat:
+        path: "{{ lab_pg_data }}/PG_VERSION"
+      register: lab_existing_pg_version
+
+    - name: Inspect Patroni configuration
+      ansible.builtin.stat:
+        path: /etc/patroni/patroni.yml
+      register: lab_existing_config
+
+    - name: Inspect lab ownership marker
+      ansible.builtin.stat:
+        path: "{{ lab_pg_owner_marker }}"
+      register: lab_existing_marker
+
+    - name: Read previously recorded ownership identity when present
+      ansible.builtin.slurp:
+        src: "{{ lab_pg_owner_marker }}"
+      register: lab_owner_content
+      when: lab_existing_marker.stat.isreg | default(false)
+
+    - name: Check non-Patroni Debian PostgreSQL cluster paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/postgresql/16/main
+        - "{{ lab_pg_mount }}/16/main"
+      register: lab_distro_cluster
+
+    - name: Check TCP PostgreSQL listener
+      ansible.builtin.command:
+        argv: [ss, -H, -ltn, 'sport = :5432']
+      changed_when: false
+      register: lab_existing_listener
+
+    - name: Reject foreign data or unrecognized existing configuration
+      ansible.builtin.assert:
+        that:
+          - not lab_existing_data.stat.exists or lab_existing_data.stat.isdir | default(false)
+          - not lab_existing_pg_version.stat.exists or lab_existing_pg_version.stat.isreg | default(false)
+          - not lab_existing_marker.stat.exists or lab_existing_marker.stat.isreg | default(false)
+          - not (lab_distro_cluster.results | selectattr('stat.exists') | list | length > 0)
+          - >-
+            not lab_existing_marker.stat.exists
+            or (lab_owner_content.content | default('') | b64decode | trim) == lab_pg_expected_owner
+          - >-
+            lab_existing_marker.stat.exists
+            or not lab_existing_data.stat.exists
+               and not lab_existing_pg_version.stat.exists
+               and not lab_existing_config.stat.exists
+               and lab_existing_listener.stdout | trim | length == 0
+          - >-
+            not lab_existing_marker.stat.exists
+            or lab_existing_config.stat.isreg | default(false)
+        fail_msg: >-
+          Unrecognized Patroni/PostgreSQL state, listener or distro cluster.
+          Do not delete files, reinitialize data or adopt a foreign database.
+
+    - name: Inspect contents of an uninitialized, marked data directory
+      ansible.builtin.find:
+        paths: "{{ lab_pg_data }}"
+        hidden: true
+        recurse: false
+        file_type: any
+      register: lab_uninitialized_entries
+      when:
+        - lab_existing_marker.stat.exists
+        - lab_existing_data.stat.exists
+        - not lab_existing_pg_version.stat.exists
+
+    - name: Require incomplete marked data directory to be empty
+      ansible.builtin.assert:
+        that:
+          - (lab_uninitialized_entries.matched | default(0) | int) == 0
+        fail_msg: >-
+          A marked but not initialized PostgreSQL directory contains files.
+          Investigate, do not overwrite or delete data.
+      when:
+        - lab_existing_marker.stat.exists
+        - lab_existing_data.stat.exists
+        - not lab_existing_pg_version.stat.exists
+
+- name: Verify that the etcd namespace is safe to use
+  hosts: "{{ groups['postgresql_nodes'][0] }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    lab_etcd_prefix: "{{ patroni_namespace | default('/service/') }}{{ postgres_cluster_name | default('pg-lab') }}/"
+  tasks:
+    - name: Inspect Patroni DCS namespace without modifying etcd
+      ansible.builtin.command:
+        argv:
+          - etcdctl
+          - --endpoints=http://127.0.0.1:2379
+          - get
+          - "{{ lab_etcd_prefix }}"
+          - --prefix
+          - --keys-only
+      environment:
+        ETCDCTL_API: '3'
+      register: lab_existing_dcs
+      changed_when: false
+
+    - name: Require new namespace only for new PostgreSQL clusters
+      ansible.builtin.assert:
+        that:
+          - >-
+            (lab_existing_dcs.stdout | trim | length == 0) ==
+            (groups['postgresql_nodes'] | map('extract', hostvars, 'lab_existing_pg_version')
+            | selectattr('stat.exists') | list | length == 0)
+        fail_msg: >-
+          Patroni DCS namespace and local PostgreSQL state disagree. Stop
+          rather than initializing over a possibly existing cluster.
+
+    - name: Record whether this run is a fresh bootstrap
+      ansible.builtin.set_fact:
+        patroni_lab_fresh_start: "{{ lab_existing_dcs.stdout | trim | length == 0 }}"
+
+- name: Install and configure Patroni without starting PostgreSQL yet
+  hosts: postgresql_nodes
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Apply existing Patroni role without touching disks or etcd membership
+      ansible.builtin.include_role:
+        name: patroni
+
+    - name: Record this lab's ownership identity after role installation
+      ansible.builtin.copy:
+        dest: /etc/patroni/.lab-bootstrap-owner
+        content: "{{ postgres_cluster_name | default('pg-lab') }}|{{ inventory_hostname }}|{{ ansible_host }}|{{ postgresql_version | default(16) }}"
+        owner: root
+        group: root
+        mode: '0600'
+
+- name: Start first Patroni member, initially promoting pg01 only on fresh clusters
+  hosts: "{{ groups['postgresql_nodes'][0] }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Start Patroni on bootstrap node
+      ansible.builtin.systemd_service:
+        name: patroni
+        enabled: true
+        state: started
+
+    - name: Wait for initial primary election only on a fresh cluster
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ patroni_rest_port | default(8008) }}/primary"
+        status_code: 200
+        timeout: 5
+      register: lab_first_primary
+      retries: 60
+      delay: 5
+      until: lab_first_primary.status | default(0) == 200
+      when: patroni_lab_fresh_start | bool
+
+- name: Start remaining Patroni members one at a time
+  hosts: "{{ groups['postgresql_nodes'][1:] | join(':') }}"
+  serial: 1
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Start Patroni on replica candidates
+      ansible.builtin.systemd_service:
+        name: patroni
+        enabled: true
+        state: started
+
+    - name: Wait for local PostgreSQL health
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ patroni_rest_port | default(8008) }}/health"
+        status_code: 200
+        timeout: 5
+      register: lab_replica_health
+      retries: 60
+      delay: 5
+      until: lab_replica_health.status | default(0) == 200
+
+- name: Verify live primary and two streaming replicas
+  hosts: "{{ groups['postgresql_nodes'][0] }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Poll Patroni DCS for expected three-member topology
+      ansible.builtin.command:
+        argv: [patronictl, -c, /etc/patroni/patroni.yml, list, --format, json]
+      register: lab_patroni_raw
+      changed_when: false
+      failed_when: false
+      retries: 60
+      delay: 5
+      until: >-
+        lab_patroni_raw.rc == 0 and
+        (lab_patroni_raw.stdout | trim | length > 0) and
+        (lab_patroni_raw.stdout | from_json | length == 3) and
+        ((lab_patroni_raw.stdout | from_json | selectattr('Role', 'equalto', 'Leader') | list | length) == 1) and
+        ((lab_patroni_raw.stdout | from_json | selectattr('State', 'equalto', 'streaming') | list | length) == 2)
+
+    - name: Parse agreed Patroni topology
+      ansible.builtin.set_fact:
+        lab_patroni_topology: "{{ lab_patroni_raw.stdout | from_json }}"
+        lab_patroni_primary: >-
+          {{ (lab_patroni_raw.stdout | from_json | selectattr('Role', 'equalto', 'Leader')
+          | map(attribute='Member') | first) }}
+
+    - name: Require the three expected inventory members
+      ansible.builtin.assert:
+        that:
+          - (lab_patroni_topology | map(attribute='Member') | list | sort) == (groups['postgresql_nodes'] | sort)
+
+    - name: Verify primary has exactly two streaming connections using SQL
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -At
+          - -d
+          - postgres
+          - -c
+          - "SELECT count(*) FROM pg_stat_replication WHERE state = 'streaming';"
+      delegate_to: "{{ lab_patroni_primary }}"
+      become: true
+      become_user: postgres
+      register: lab_streaming_count
+      changed_when: false
+      retries: 30
+      delay: 2
+      until: lab_streaming_count.rc == 0 and (lab_streaming_count.stdout | trim) == '2'
+
+    - name: Print verified replication summary without secrets
+      ansible.builtin.debug:
+        msg: >-
+          Primary {{ lab_patroni_primary }}; 2 streaming replicas; all three
+          Patroni members running. No storage reset or etcd membership change.

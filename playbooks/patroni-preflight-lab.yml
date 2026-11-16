@@ -1,0 +1,114 @@
+---
+# Read-only checks before PostgreSQL/Patroni installation. No packages,
+# service changes, PostgreSQL bootstrap, filesystem operations or credentials.
+- ansible.builtin.import_playbook: inventory-preflight.yml
+
+- name: Require the supported three-node colocated lab shape
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Reject unsupported lab placement before remote inspection
+      ansible.builtin.assert:
+        that:
+          - groups.get('postgresql_nodes', []) | length == 3
+          - groups.get('etcd_nodes', []) | length == 3
+          - (groups['postgresql_nodes'] | sort) == (groups['etcd_nodes'] | sort)
+        fail_msg: >-
+          Initial Patroni lab verification supports exactly three colocated
+          PostgreSQL and etcd members. No service deployment is attempted.
+
+- name: Verify the existing etcd quorum without modifying it
+  hosts: "{{ groups['etcd_nodes'][0] }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Reuse the already tested read-only etcd verification
+      ansible.builtin.include_role:
+        name: etcd
+        tasks_from: verify
+
+- name: Inspect existing PostgreSQL storage and Patroni state
+  hosts: postgresql_nodes
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    patroni_lab_mount: "{{ postgres_mount_point | default('/var/lib/postgresql') }}"
+    patroni_lab_vg: "{{ postgres_vg_name | default('vg_postgresql') }}"
+    patroni_lab_lv: "{{ postgres_lv_name | default('lv_postgresql') }}"
+    patroni_lab_major: "{{ postgresql_version | default(16) }}"
+  tasks:
+    - name: Read mounted PostgreSQL volume source
+      ansible.builtin.command:
+        argv: [findmnt, --mountpoint, "{{ patroni_lab_mount }}", --noheadings, --output, SOURCE]
+      changed_when: false
+      register: patroni_lab_mount_source
+
+    - name: Read mounted PostgreSQL filesystem type
+      ansible.builtin.command:
+        argv: [findmnt, --mountpoint, "{{ patroni_lab_mount }}", --noheadings, --output, FSTYPE]
+      changed_when: false
+      register: patroni_lab_mount_fstype
+
+    - name: Resolve the mounted source to its physical device mapping
+      ansible.builtin.command:
+        argv: [readlink, -f, "{{ patroni_lab_mount_source.stdout | trim }}"]
+      changed_when: false
+      register: patroni_lab_actual_device
+
+    - name: Resolve the expected managed PostgreSQL LV
+      ansible.builtin.command:
+        argv: [readlink, -f, "/dev/{{ patroni_lab_vg }}/{{ patroni_lab_lv }}"]
+      changed_when: false
+      register: patroni_lab_expected_device
+
+    - name: Require the previously verified XFS volume before any future bootstrap
+      ansible.builtin.assert:
+        that:
+          - patroni_lab_mount_fstype.stdout | trim == 'xfs'
+          - patroni_lab_actual_device.stdout | trim == patroni_lab_expected_device.stdout | trim
+          - patroni_lab_actual_device.stdout | trim is match('^/dev/')
+        fail_msg: >-
+          PostgreSQL data path is not the expected mounted, managed XFS LV.
+          Stop before any database installation; never format the disk.
+
+    - name: Inspect existing Patroni-managed PG_VERSION
+      ansible.builtin.stat:
+        path: "{{ patroni_lab_mount }}/{{ patroni_lab_major }}/patroni/PG_VERSION"
+      register: patroni_lab_pg_version
+
+    - name: Inspect existing Patroni data directory
+      ansible.builtin.stat:
+        path: "{{ patroni_lab_mount }}/{{ patroni_lab_major }}/patroni"
+      register: patroni_lab_pg_directory
+
+    - name: Inspect existing Patroni configuration without reading secrets
+      ansible.builtin.stat:
+        path: /etc/patroni/patroni.yml
+      register: patroni_lab_configuration
+
+    - name: Observe Patroni service state without starting it
+      ansible.builtin.command:
+        argv: [systemctl, is-active, patroni]
+      register: patroni_lab_service
+      failed_when: false
+      changed_when: false
+
+    - name: Observe PostgreSQL listener without opening connections
+      ansible.builtin.command:
+        argv: [ss, -H, -ltn, "sport = :5432"]
+      register: patroni_lab_listeners
+      failed_when: false
+      changed_when: false
+
+    - name: Print nonsecret lab readiness evidence
+      ansible.builtin.debug:
+        msg:
+          - "mount={{ patroni_lab_mount }} source={{ patroni_lab_mount_source.stdout | trim }} fs={{ patroni_lab_mount_fstype.stdout | trim }}"
+          - "PG_VERSION={{ patroni_lab_pg_version.stat.exists | bool }} data_dir={{ patroni_lab_pg_directory.stat.exists | bool }}"
+          - "patroni_config={{ patroni_lab_configuration.stat.exists | bool }} patroni_service={{ patroni_lab_service.stdout | trim }}"
+          - "postgresql_5432_listening={{ patroni_lab_listeners.stdout | trim | length > 0 }}"
+          - "This playbook is read-only. Bootstrap and credentials are deliberately out of scope."
