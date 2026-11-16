@@ -34,7 +34,7 @@ def variables(env):
     cfg = yaml.safe_load((ROOT/'inventory/production/group_vars/all/main.yml').read_text())
     nodes = yaml.safe_load((ROOT/'inventory/production/hosts.yml').read_text())['all']['children']['postgresql_cluster']['hosts']
     cfg.update(nodes['pg-node-01'])
-    cfg.update(inventory_hostname='pg-node-01', groups={'postgresql_cluster':list(nodes)}, hostvars=nodes,
+    cfg.update(inventory_hostname='pg-node-01', groups={'postgresql_cluster':list(nodes)}, etcd_cluster_hosts=list(nodes), hostvars=nodes,
                ansible_facts={'default_ipv4':{'interface':'eth0'}}, vault_ansible_become_password='dummy',
                vault_postgres_superuser_password='dummy',vault_postgres_replication_password='dummy',
                vault_postgres_rewind_password='dummy',vault_patroni_rest_password='dummy',

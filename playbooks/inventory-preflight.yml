@@ -6,6 +6,7 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  any_errors_fatal: true
   vars:
     pg_nodes: "{{ groups.get('postgresql_nodes', []) }}"
     etcd_nodes: "{{ groups.get('etcd_nodes', []) }}"

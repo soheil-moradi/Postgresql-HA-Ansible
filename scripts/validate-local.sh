@@ -13,9 +13,8 @@ done
 printf '\n== Inventory preflight (controller only) ==\n'
 ansible-playbook -i inventory/examples/topology-3-vm.yml playbooks/inventory-preflight.yml
 
-printf '\n== Unit and optional integration tests ==\n'
-python -m unittest discover -s tests -v
-
+# Parse every playbook before running tests that invoke ansible-playbook.
+# This surfaces invalid roles/playbooks instead of an opaque controller-gate failure.
 printf '\n== All Ansible entry points: syntax ==\n'
 # The public inventory uses postgresql_nodes; legacy playbooks still expect
 # postgresql_cluster. The second, syntax-only inventory aliases the groups
@@ -24,6 +23,9 @@ ansible-playbook \
   -i inventory/examples/topology-3-vm.yml \
   -i inventory/examples/syntax-legacy-alias.ini \
   site.yml playbooks/*.yml --syntax-check
+
+printf '\n== Unit and optional integration tests ==\n'
+python -m unittest discover -s tests -v
 
 printf '\n== Git whitespace checks ==\n'
 git diff --check

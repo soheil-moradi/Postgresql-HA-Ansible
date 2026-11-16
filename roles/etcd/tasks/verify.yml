@@ -1,0 +1,97 @@
+---
+# Read-only quorum verification. Invoke only after all etcd members have started.
+- name: Read etcd membership from the live cluster
+  ansible.builtin.command:
+    argv:
+      - etcdctl
+      - "--endpoints={{ etcd_client_endpoints_csv }}"
+      - member
+      - list
+      - --write-out=json
+  environment:
+    ETCDCTL_API: '3'
+    ETCDCTL_CACERT: "{{ etcd_tls_ca_file if (etcd_tls_enabled | bool) else omit }}"
+    ETCDCTL_CERT: "{{ etcd_tls_client_cert_file if (etcd_tls_enabled | bool) else omit }}"
+    ETCDCTL_KEY: "{{ etcd_tls_client_key_file if (etcd_tls_enabled | bool) else omit }}"
+  register: etcd_members_raw
+  changed_when: false
+  retries: 15
+  delay: 3
+  until: etcd_members_raw.rc == 0
+
+- name: Parse cluster membership
+  ansible.builtin.set_fact:
+    etcd_members: "{{ (etcd_members_raw.stdout | from_json).members }}"
+
+- name: Require only the declared etcd members
+  ansible.builtin.assert:
+    that:
+      - etcd_members | length == etcd_cluster_hosts | length
+      - (etcd_members | map(attribute='name') | list | sort) == (etcd_cluster_hosts | sort)
+    fail_msg: >-
+      Live etcd membership differs from inventory. Refusing to treat this
+      cluster as verified or perform automatic member changes.
+
+- name: Verify each advertised peer URL matches inventory
+  ansible.builtin.assert:
+    that:
+      - >-
+        (etcd_members | selectattr('name', 'equalto', item)
+        | map(attribute='peerURLs') | first)
+        == [('https' if (etcd_tls_enabled | bool) else 'http')
+            ~ '://' ~ hostvars[item].ansible_host ~ ':' ~ (etcd_peer_port | string)]
+    fail_msg: "Unexpected etcd peer URL for {{ item }}."
+  loop: "{{ etcd_cluster_hosts }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Read etcd endpoint status from every declared member
+  ansible.builtin.command:
+    argv:
+      - etcdctl
+      - "--endpoints={{ etcd_client_endpoints_csv }}"
+      - endpoint
+      - status
+      - --write-out=json
+  environment:
+    ETCDCTL_API: '3'
+    ETCDCTL_CACERT: "{{ etcd_tls_ca_file if (etcd_tls_enabled | bool) else omit }}"
+    ETCDCTL_CERT: "{{ etcd_tls_client_cert_file if (etcd_tls_enabled | bool) else omit }}"
+    ETCDCTL_KEY: "{{ etcd_tls_client_key_file if (etcd_tls_enabled | bool) else omit }}"
+  register: etcd_status_raw
+  changed_when: false
+  retries: 15
+  delay: 3
+  until: etcd_status_raw.rc == 0
+
+- name: Parse observed etcd endpoint states
+  ansible.builtin.set_fact:
+    etcd_statuses: "{{ etcd_status_raw.stdout | from_json }}"
+
+- name: Verify each declared endpoint returned a healthy status
+  ansible.builtin.assert:
+    that:
+      - etcd_statuses | length == etcd_cluster_hosts | length
+      - item.Error | default('') | length == 0
+      - item.Status is defined
+      - item.Status.header.member_id is defined
+      - item.Status.leader | int > 0
+    fail_msg: "Missing or unhealthy etcd endpoint: {{ item.Endpoint | default('unknown') }}."
+  loop: "{{ etcd_statuses }}"
+  loop_control:
+    label: "{{ item.Endpoint | default('unknown') }}"
+
+- name: Require distinct member IDs and one agreed elected leader
+  ansible.builtin.assert:
+    that:
+      - (etcd_statuses | map(attribute='Status.header.member_id') | list | unique | length) == (etcd_cluster_hosts | length)
+      - (etcd_statuses | map(attribute='Status.leader') | list | unique | length) == 1
+    fail_msg: >-
+      etcd endpoints must have unique member IDs and agree on one elected
+      leader. Investigate quorum before starting Patroni.
+
+- name: Report verified etcd quorum
+  ansible.builtin.debug:
+    msg: >-
+      Verified {{ etcd_members | length }} etcd members, {{ etcd_statuses | length }}
+      responding endpoints and one agreed leader; no membership was modified.
