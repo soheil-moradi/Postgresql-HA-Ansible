@@ -1,3 +1,5 @@
+{% set pg_hosts = groups.get('postgresql_nodes', groups.get('postgresql_cluster', [])) %}
+{% set etcd_hosts = groups.get('etcd_nodes', groups.get('postgresql_cluster', [])) %}
 scope: {{ postgres_cluster_name | to_json }}
 namespace: {{ patroni_namespace | to_json }}
 name: {{ inventory_hostname | to_json }}
@@ -22,7 +24,7 @@ restapi:
 
 etcd3:
   hosts:
-{% for host in groups['postgresql_cluster'] %}
+{% for host in etcd_hosts %}
     - {{ hostvars[host].ansible_host }}:{{ etcd_client_port }}
 {% endfor %}
 {% if etcd_tls_enabled | bool %}
@@ -48,7 +50,7 @@ bootstrap:
   pg_hba:
     - local all all peer
     - host all all 127.0.0.1/32 scram-sha-256
-{% for host in groups['postgresql_cluster'] %}
+{% for host in pg_hosts %}
     - host replication {{ patroni_replication_username }} {{ hostvars[host].ansible_host }}/32 scram-sha-256
     - host all {{ patroni_rewind_username }} {{ hostvars[host].ansible_host }}/32 scram-sha-256
     - host all all {{ hostvars[host].ansible_host }}/32 scram-sha-256

@@ -24,7 +24,7 @@
     PGSSLROOTCERT: "{{ postgresql_tls_ca_file if (postgresql_tls_internal_sslmode | default('prefer')) not in ['prefer', 'disable'] else omit }}"
     PGCONNECT_TIMEOUT: '5'
     PGOPTIONS: '-c statement_timeout=10000'
-  loop: "{{ groups['postgresql_cluster'] }}"
+  loop: "{{ groups.get('postgresql_nodes', groups.get('postgresql_cluster', [])) }}"
   register: internal_tls_probe
   changed_when: false
   failed_when: internal_tls_probe.rc != 0 or internal_tls_probe.stdout | trim != 't'
