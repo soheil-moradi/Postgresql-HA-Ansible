@@ -5,7 +5,7 @@ ETCD_LISTEN_PEER_URLS="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_peer_port 
 ETCD_LISTEN_CLIENT_URLS="{{ etcd_scheme }}://127.0.0.1:{{ etcd_client_port }},{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_client_port }}"
 ETCD_INITIAL_ADVERTISE_PEER_URLS="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_peer_port }}"
 ETCD_ADVERTISE_CLIENT_URLS="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_client_port }}"
-ETCD_INITIAL_CLUSTER="{% for host in groups['postgresql_cluster'] %}{{ host }}={{ etcd_scheme }}://{{ hostvars[host].ansible_host }}:{{ etcd_peer_port }}{% if not loop.last %},{% endif %}{% endfor %}"
+ETCD_INITIAL_CLUSTER="{% for host in etcd_cluster_hosts %}{{ host }}={{ etcd_scheme }}://{{ hostvars[host].ansible_host }}:{{ etcd_peer_port }}{% if not loop.last %},{% endif %}{% endfor %}"
 ETCD_INITIAL_CLUSTER_STATE="new"
 ETCD_INITIAL_CLUSTER_TOKEN="{{ etcd_cluster_token }}"
 ETCD_AUTO_COMPACTION_RETENTION="1"

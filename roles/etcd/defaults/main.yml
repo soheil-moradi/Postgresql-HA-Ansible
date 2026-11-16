@@ -10,3 +10,15 @@ etcd_tls_peer_cert_file: /etc/etcd/tls/peer.crt
 etcd_tls_peer_key_file: /etc/etcd/tls/peer.key
 etcd_tls_client_cert_file: /etc/etcd/tls/client.crt
 etcd_tls_client_key_file: /etc/etcd/tls/client.key
+
+# Inventory-driven placement; retain the legacy group for old deploy.yml.
+# A separate etcd_nodes group takes precedence when provided.
+etcd_cluster_hosts: "{{ groups.get('etcd_nodes', groups.get('postgresql_cluster', [])) }}"
+etcd_client_port: 2379
+etcd_peer_port: 2380
+etcd_data_dir: /var/lib/etcd
+# Inventory/production group vars can override these role defaults.
+etcd_client_endpoints_csv: >-
+  {%- for host in etcd_cluster_hosts -%}
+  {{ 'https' if (etcd_tls_enabled | bool) else 'http' }}://{{ hostvars[host].ansible_host }}:{{ etcd_client_port }}{% if not loop.last %},{% endif %}
+  {%- endfor -%}

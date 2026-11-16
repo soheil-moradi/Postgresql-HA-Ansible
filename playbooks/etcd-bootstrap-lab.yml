@@ -1,0 +1,116 @@
+---
+# Lab-only first milestone. No Patroni, PostgreSQL, storage, or VIP operations.
+# Plaintext etcd on trusted disposable lab nodes requires explicit opt-in.
+- ansible.builtin.import_playbook: inventory-preflight.yml
+
+- name: Require explicit approval for disposable plaintext etcd lab
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Reject unapproved plaintext etcd deployment
+      ansible.builtin.assert:
+        that:
+          - groups.get('etcd_nodes', []) | length == 3
+          - etcd_lab_plaintext_approved | default(false) | bool
+          - not (etcd_tls_enabled | default(false) | bool)
+        fail_msg: >-
+          This lab-only entry point requires exactly three etcd_nodes,
+          etcd_lab_plaintext_approved=true and etcd_tls_enabled=false.
+          Never use this plaintext workflow on an untrusted or production network.
+
+- name: Install and bootstrap the initial three-member etcd lab
+  hosts: etcd_nodes
+  become: true
+  gather_facts: false
+  strategy: linear
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Refuse partial etcd bootstrap or bypassed lab approval
+      ansible.builtin.assert:
+        that:
+          - (ansible_play_hosts_all | sort) == (groups['etcd_nodes'] | sort)
+          - etcd_lab_plaintext_approved | default(false) | bool
+          - not (etcd_tls_enabled | bool)
+        fail_msg: >-
+          Bootstrap must target all three etcd_nodes together with explicit
+          lab approval. Do not use --limit for initial quorum creation.
+
+    - name: Gather facts only after passing the controller-side approval guard
+      ansible.builtin.setup: {}
+
+    # Resolve the cluster identity on every host before the etcd role runs.
+    # Ansible set_fact is visible to subsequent role tasks for the same host.
+    - name: Establish the deterministic etcd lab cluster token for each member
+      ansible.builtin.set_fact:
+        etcd_cluster_token: "{{ 'lab-' ~ ((groups['etcd_nodes'] | map('extract', hostvars, 'ansible_host') | join(',')) | hash('sha256'))[:20] }}"
+
+    - name: Require identical calculated etcd tokens before modifying services
+      ansible.builtin.assert:
+        that:
+          - etcd_cluster_token is defined
+          - etcd_cluster_token | length == 24
+          - etcd_cluster_token == ('lab-' ~ ((groups['etcd_nodes'] | map('extract', hostvars, 'ansible_host') | join(',')) | hash('sha256'))[:20])
+          - (groups['etcd_nodes'] | map('extract', hostvars, 'etcd_cluster_token') | list | unique | length) == 1
+        fail_msg: >-
+          All three etcd members must use the same deterministic lab token.
+          Refusing to install or start etcd if cluster identity disagrees.
+
+    - name: Require Debian-family lab images for the existing APT-based etcd role
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == 'Debian'
+          - not (etcd_tls_enabled | bool)
+        fail_msg: >-
+          The current etcd package role uses APT. RHEL support is a separate
+          milestone; refusing to run the Debian tasks on this host.
+    - name: Inspect pre-existing etcd member data without modifying it
+      ansible.builtin.stat:
+        path: "{{ etcd_data_dir | default('/var/lib/etcd') }}/member"
+      register: etcd_previous_member
+
+    - name: Inspect the pre-existing etcd configuration
+      ansible.builtin.stat:
+        path: /etc/default/etcd
+      register: etcd_previous_config_stat
+
+    - name: Read the existing etcd configuration only when reusing member data
+      ansible.builtin.slurp:
+        src: /etc/default/etcd
+      register: etcd_previous_config
+      when:
+        - etcd_previous_member.stat.exists
+        - etcd_previous_config_stat.stat.isreg | default(false)
+
+    - name: Reject adopting a pre-existing foreign etcd data directory
+      ansible.builtin.assert:
+        that:
+          - not etcd_previous_member.stat.exists or etcd_previous_member.stat.isdir
+          - >-
+            not etcd_previous_member.stat.exists
+            or ('ETCD_NAME="' ~ inventory_hostname ~ '"')
+               in (etcd_previous_config.content | default('') | b64decode)
+          - >-
+            not etcd_previous_member.stat.exists
+            or ('ETCD_INITIAL_CLUSTER_TOKEN="' ~ etcd_cluster_token ~ '"')
+               in (etcd_previous_config.content | default('') | b64decode)
+          - >-
+            not etcd_previous_member.stat.exists
+            or ('ETCD_INITIAL_ADVERTISE_PEER_URLS="http://' ~ ansible_host
+                ~ ':' ~ (etcd_peer_port | default(2380) | string) ~ '"')
+               in (etcd_previous_config.content | default('') | b64decode)
+        fail_msg: >-
+          Existing etcd member data is not recognized as this exact lab
+          cluster. Stop; no member migration or data reset is permitted.
+  roles:
+    - role: etcd
+
+- name: Verify membership and an elected etcd leader without changes
+  hosts: "{{ groups['etcd_nodes'][0] }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: etcd
+      tasks_from: verify
