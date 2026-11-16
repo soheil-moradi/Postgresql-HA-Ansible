@@ -1,12 +1,15 @@
 ---
 # Read-only host-side gate. All destructive operations are in main.yml *after*
 # these checks have completed successfully.
+- name: Resolve the PostgreSQL data disk (explicit or auto)
+  ansible.builtin.import_tasks: discover.yml
+
 - name: Validate PostgreSQL storage configuration
   ansible.builtin.assert:
     that:
-      - postgres_data_device is defined
-      - postgres_data_device is string
-      - postgres_data_device is match('^/dev/')
+      - storage_selected_device is defined
+      - storage_selected_device is string
+      - storage_selected_device is match('^/dev/')
       - postgres_vg_name is match('^[a-zA-Z0-9_+.-]+$')
       - postgres_lv_name is match('^[a-zA-Z0-9_+.-]+$')
       - postgres_filesystem in ['xfs', 'ext4']
@@ -15,7 +18,7 @@
 
 - name: Confirm the dedicated data device exists
   ansible.builtin.stat:
-    path: "{{ postgres_data_device }}"
+    path: "{{ storage_selected_device }}"
     follow: true
   register: storage_device_stat
 
@@ -35,7 +38,7 @@
       - --tree
       - --output
       - KNAME,TYPE,FSTYPE,MOUNTPOINTS
-      - "{{ postgres_data_device }}"
+      - "{{ storage_selected_device }}"
   changed_when: false
   register: storage_lsblk_raw
 
@@ -55,7 +58,7 @@
 
 - name: Inspect disk signatures without erasing them
   ansible.builtin.command:
-    argv: [wipefs, --no-act, "{{ postgres_data_device }}"]
+    argv: [wipefs, --no-act, "{{ storage_selected_device }}"]
   changed_when: false
   register: storage_disk_signatures
 
@@ -76,7 +79,6 @@
     that:
       - storage_disk_children | length == 0
       - storage_disk_signatures.stdout | trim | length == 0
-      - postgres_data_disk_allow_initialize | default(false) | bool
     fail_msg: >-
       Initialization requires an explicitly approved, truly empty whole disk
       (no partitions, dependent devices, signatures or mounts).
@@ -84,7 +86,7 @@
 
 - name: Verify the existing physical volume maps to the expected VG
   ansible.builtin.command:
-    argv: [pvs, --noheadings, -o, vg_name, "{{ postgres_data_device }}"]
+    argv: [pvs, --noheadings, -o, vg_name, "{{ storage_selected_device }}"]
   register: storage_existing_disk_vg
   changed_when: false
   when: storage_disk_is_managed | bool

@@ -46,18 +46,22 @@
             == (inventory_nodes | length)
         fail_msg: "Two distinct inventory hosts have the same ansible_host."
 
-    - name: Require PostgreSQL identity and a declared dedicated data device
+    - name: Require PostgreSQL identity and a safe storage selection mode
       ansible.builtin.assert:
         that:
           - hostvars[item].node_fqdn is defined
           - hostvars[item].node_fqdn | string | trim | length > 0
-          - hostvars[item].postgres_data_device is defined
-          - hostvars[item].postgres_data_device | string | trim | length > 0
-          - hostvars[item].postgres_data_device | string is match('^/dev/')
+          - hostvars[item].postgres_storage_discovery_mode | default('explicit') in ['explicit', 'auto']
+          - >-
+            (hostvars[item].postgres_storage_discovery_mode | default('explicit') == 'auto')
+            or (
+              hostvars[item].postgres_data_device is defined
+              and (hostvars[item].postgres_data_device | default('') | string is match('^/dev/'))
+            )
         fail_msg: >-
-          PostgreSQL host {{ item }} requires node_fqdn and a dedicated
-          postgres_data_device. On-host checks must verify disk identity
-          before any partition, PV, or filesystem operation.
+          PostgreSQL host {{ item }} requires node_fqdn and either explicit
+          postgres_data_device or opted-in auto discovery. On-host checks
+          must verify disk identity before any PV/filesystem operation.
       loop: "{{ pg_nodes }}"
       loop_control:
         label: "{{ item }}"

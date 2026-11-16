@@ -3,10 +3,19 @@
 - name: Validate PostgreSQL storage identity and destination
   ansible.builtin.import_tasks: validate.yml
 
+- name: Require explicit permission before any new storage initialization
+  ansible.builtin.assert:
+    that:
+      - postgres_data_disk_allow_initialize | bool
+    fail_msg: >-
+      New disk initialization requires explicit operator approval.
+      Set postgres_data_disk_allow_initialize=true only for a verified disposable disk.
+  when: not storage_disk_is_managed | bool
+
 - name: Initialize PostgreSQL volume group on the confirmed empty disk
   community.general.lvg:
     vg: "{{ postgres_vg_name }}"
-    pvs: "{{ postgres_data_device }}"
+    pvs: "{{ storage_selected_device }}"
     remove_extra_pvs: false
     state: present
   when: not storage_disk_is_managed | bool
@@ -47,7 +56,7 @@
 
 - name: Verify the mountpoint after storage reconciliation
   ansible.builtin.command:
-    argv: [findmnt, --mountpoint, "{{ postgres_mount_point }}", --noheadings, --output, SOURCE,FSTYPE]
+    argv: [findmnt, --mountpoint, "{{ postgres_mount_point }}", --noheadings, --output, "SOURCE,FSTYPE"]
   changed_when: false
   register: storage_final_mount
 

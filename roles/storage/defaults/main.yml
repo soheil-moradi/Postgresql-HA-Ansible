@@ -1,0 +1,11 @@
+---
+# Safe defaults for an external private inventory, including disposable labs.
+# Auto discovery and initialization are both opt-in; production is explicit.
+postgres_storage_discovery_mode: explicit
+postgres_data_disk_allow_initialize: false
+postgres_vg_name: vg_postgresql
+postgres_lv_name: lv_postgresql
+postgres_filesystem: xfs
+postgres_mount_point: /var/lib/postgresql
+postgres_mount_options: defaults,noatime
+postgres_ext4_reserved_percent: 1

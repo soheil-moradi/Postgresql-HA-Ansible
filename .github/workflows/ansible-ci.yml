@@ -29,4 +29,8 @@ jobs:
           POSTGRES_TEST_DSN: postgresql://postgres:disposable-ci-password@127.0.0.1:5432/postgres
         run: python -m unittest discover -s tests -v
       - name: Syntax-check every entry point
-        run: ansible-playbook site.yml playbooks/*.yml --syntax-check
+        run: >-
+          ansible-playbook
+          -i inventory/examples/topology-3-vm.yml
+          -i inventory/examples/syntax-legacy-alias.ini
+          site.yml playbooks/*.yml --syntax-check
